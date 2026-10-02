@@ -1,0 +1,15 @@
+# Bundle patch for @ignotuss/dsh-desktop-bridge.
+#
+# `dsh plugin add` installs the package and this row mounts it, so installing
+# the plugin never needs a hand-edited profile. The name below is the published
+# package; republishing under another scope means editing it here too.
+- insert:
+    - id: desktop-bridge
+      name: '@ignotuss/dsh-desktop-bridge'
+      config: {}
+      # Optional hardening. The values below are what apply when the key is
+      # omitted, so an empty `config: {}` is the permissive default.
+      #
+      #   allowCreate: true    # false rejects POST /v1/sessions entirely
+      #   auditLog: true       # one JSON line per request in <DSH_HOME>/desktop-bridge.log
+      #   cwdAllowlist: []     # e.g. ['C:\\work'] — only these roots may host new sessions

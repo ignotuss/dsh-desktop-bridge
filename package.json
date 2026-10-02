@@ -1,0 +1,58 @@
+{
+  "name": "@ignotuss/dsh-desktop-bridge",
+  "version": "0.1.0",
+  "description": "Token-authenticated loopback HTTP API that lets any local program drive the sessions of a running DSH (DeepSeek Harness) host",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "dsh-desktop-bridge": "bin/bridge-client.mjs"
+  },
+  "files": [
+    "src/index.js",
+    "bin/bridge-client.mjs",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "bridge",
+    "http",
+    "localhost",
+    "session",
+    "agent"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ignotuss/dsh-desktop-bridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ignotuss/dsh-desktop-bridge/issues"
+  },
+  "homepage": "https://github.com/ignotuss/dsh-desktop-bridge#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

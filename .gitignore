@@ -1,0 +1,8 @@
+node_modules/
+desktop-bridge.json
+desktop-bridge.log
+*.tmp
+npm-debug.log*
+yarn-error.log*
+.DS_Store
+Thumbs.db

@@ -1,0 +1,10 @@
+# Keep every text file at LF in the repository regardless of the platform that
+# commits it. `bin/bridge-client.mjs` starts with a shebang, and a CRLF shebang
+# does not execute on POSIX systems — which would silently break the installed
+# `dsh-desktop-bridge` command for macOS and Linux users.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.tgz binary
