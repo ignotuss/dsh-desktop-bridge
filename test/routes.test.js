@@ -17,7 +17,7 @@ function stubController(overrides = {}) {
     create: async (payload) => { calls.push(['create', payload]); return { sessionId: SESSION, agentPreset: 'standard' } },
     rename: async (payload) => { calls.push(['rename', payload]); return { title: payload.title, seq: 7 } },
     list: async () => ({ items: [{ sessionId: SESSION }] }),
-    inspect: async () => ({ events: [{ seq: 1 }, { seq: 2 }, { seq: 3 }] }),
+    inspect: async (sessionId) => { calls.push(['inspect', sessionId]); return { events: [{ seq: 1 }, { seq: 2 }, { seq: 3 }] } },
     prompt: async (payload) => { calls.push(['prompt', payload]); return { accepted: true } },
     ...overrides,
   }
@@ -193,6 +193,7 @@ test('bounds and forwards a message', async () => {
     const [, payload] = s.controller.calls.at(-1)
     assert.equal(payload.sessionId, SESSION)
     assert.deepEqual(payload.content, [{ type: 'text', text: 'ping' }])
+    assert.equal(payload.mode, 'queue')
   } finally { await s.close() }
 })
 
@@ -204,6 +205,33 @@ test('bounds the events read and honours the limit', async () => {
     const response = await call(s.base, `/v1/sessions/${SESSION}/events?limit=2`, { headers: { authorization: `Bearer ${TOKEN}` } })
     assert.equal(response.status, 200)
     assert.deepEqual((await response.json()).events, [{ seq: 2 }, { seq: 3 }])
+    assert.deepEqual(s.controller.calls.at(-1), ['inspect', SESSION], 'older hosts keep using inspect')
+  } finally { await s.close() }
+})
+
+test('reads events through the current events API when the host provides it', async () => {
+  const calls = []
+  const controller = stubController({
+    inspect: async () => { throw new Error('legacy inspect must not be used when events exists') },
+    events: async (payload) => {
+      calls.push(payload)
+      return {
+        records: [
+          { type: 'event', event: { seq: 1, type: 'one' } },
+          { type: 'event', event: { seq: 2, type: 'two' } },
+          { type: 'event', event: { seq: 3, type: 'three' } },
+        ],
+        hasMore: false,
+        cursor: 3,
+      }
+    },
+  })
+  const s = await start({ controller })
+  try {
+    const response = await call(s.base, `/v1/sessions/${SESSION}/events?limit=2`, { headers: { authorization: `Bearer ${TOKEN}` } })
+    assert.equal(response.status, 200)
+    assert.deepEqual((await response.json()).events, [{ seq: 2, type: 'two' }, { seq: 3, type: 'three' }])
+    assert.deepEqual(calls, [{ address: { kind: 'session', sessionId: SESSION }, maxMessages: 2 }])
   } finally { await s.close() }
 })
 

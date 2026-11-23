@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- Pass the plugin config through Cordis's `apply(ctx, config)` contract instead
+  of reading `ctx.config`.
+- Read session events through `sessionController.events` on current DSH releases,
+  keeping the `inspect` fallback for older releases.
+- Send prompts with the documented `queue` mode.
+
 ## 0.1.0 — 2026-10-02
 
 First public release (`npm publish` at 2026-10-02T02:54:12Z, shasum

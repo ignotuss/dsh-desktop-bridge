@@ -17,12 +17,11 @@ function stubController() {
   }
 }
 
-function fakeContext(controller = stubController(), config = {}) {
+function fakeContext(controller = stubController()) {
   const logs = []
   let disposer
   return {
     sessionController: controller,
-    config,
     logger: { info: (line) => logs.push(line) },
     logs,
     effect(factory) { disposer = factory() },
@@ -88,10 +87,10 @@ test('apply writes one audit line per request when auditing is on', async () => 
   })
 })
 
-test('apply honours allowCreate=false and writes no audit log when off', async () => {
+test('apply honours an allowCreate=false config argument and writes no audit log when off', async () => {
   await withHome(async (home) => {
-    const ctx = fakeContext(undefined, { allowCreate: false, auditLog: false })
-    await apply(ctx)
+    const ctx = fakeContext()
+    await apply(ctx, { allowCreate: false, auditLog: false })
     const descriptor = JSON.parse(await readFile(join(home, 'desktop-bridge.json'), 'utf8'))
     const headers = { authorization: `Bearer ${descriptor.token}`, 'content-type': 'application/json' }
     const response = await fetch(`http://127.0.0.1:${descriptor.port}/v1/sessions`, {
