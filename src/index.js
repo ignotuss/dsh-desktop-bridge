@@ -15,6 +15,10 @@ const MAX_TEXT = 4 * 1024
 const MAX_CWD = 2048
 const MAX_TITLE = 200
 const SESSION_ID = /^session-[0-9a-f-]{36}$/i
+const WAIT_DEFAULT_SECONDS = 30
+const WAIT_MAX_SECONDS = 3600
+const WAIT_EVENT_WINDOW = 200
+const WAIT_POLL_MS = 250
 
 function json(res, status, value) {
   res.writeHead(status, {
@@ -100,6 +104,137 @@ async function cwdProblem(cwd) {
   let info
   try { info = await stat(cwd) } catch { return 'cwd must be an existing directory' }
   return info.isDirectory() ? undefined : 'cwd must be an existing directory'
+}
+
+function assistantText(event) {
+  const content = event?.data?.message?.content
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter((part) => part?.type === 'text' && typeof part.text === 'string')
+    .map((part) => part.text)
+    .join('')
+}
+
+function joinedReplies(replies) {
+  return [...replies.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, text]) => text)
+    .filter((text) => text !== '')
+    .join('\n')
+}
+
+async function readSessionEvents(controller, sessionId, count, signal) {
+  if (typeof controller.events === 'function') {
+    const result = await controller.events({
+      address: { kind: 'session', sessionId },
+      maxMessages: count,
+    }, signal)
+    return result.records.slice(-count).map((record) => record.event)
+  }
+  const result = await controller.inspect(sessionId, signal)
+  return result.events.slice(-count)
+}
+
+/**
+ * Wait for the turn carrying one request to finish, without cancelling or
+ * resending it. Session-level quiescence is not enough: another queued turn can
+ * end first, so the request id selects the user message and its turn.
+ *
+ * @param controller - the host's `sessionController` service.
+ * @param sessionId - the Session that received the prompt.
+ * @param requestId - the client-minted request id returned by `prompt`.
+ * @param options - `timeoutMs` and `pollIntervalMs` (the latter for tests).
+ * @returns a script-friendly wait result.
+ */
+export async function waitForRequest(controller, sessionId, requestId, options = {}) {
+  const timeoutMs = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
+    ? options.timeoutMs
+    : WAIT_DEFAULT_SECONDS * 1000
+  const pollMs = Number.isFinite(options.pollIntervalMs) && options.pollIntervalMs >= 0
+    ? options.pollIntervalMs
+    : WAIT_POLL_MS
+  const startedAt = Date.now()
+  const deadline = startedAt + timeoutMs
+  const assistantByTurn = new Map()
+  let userSeq
+  let turn
+  let cursor = 0
+
+  while (true) {
+    const events = await readSessionEvents(
+      controller, sessionId, WAIT_EVENT_WINDOW, AbortSignal.timeout(10000),
+    )
+    for (const event of events) {
+      if (Number.isInteger(event?.seq) && event.seq > cursor) cursor = event.seq
+      if (event?.type === 'assistant/message' && Number.isInteger(event?.data?.turn)) {
+        let replies = assistantByTurn.get(event.data.turn)
+        if (replies === undefined) {
+          replies = new Map()
+          assistantByTurn.set(event.data.turn, replies)
+        }
+        replies.set(event.seq, assistantText(event))
+      }
+    }
+
+    const requestEvent = events.find((event) => event?.type === 'user/message'
+      && event?.data?.source?.rpcId === requestId)
+    if (requestEvent) userSeq = requestEvent.seq
+    if (turn === undefined && userSeq !== undefined) {
+      const turnEvent = events.find((event) => event?.seq > userSeq && Number.isInteger(event?.data?.turn))
+      if (turnEvent) turn = turnEvent.data.turn
+    }
+
+    const replies = turn === undefined ? new Map() : (assistantByTurn.get(turn) ?? new Map())
+    if (turn !== undefined) {
+      const end = events.find((event) => event?.type === 'turn/end' && event?.data?.turn === turn)
+      if (end) {
+        const reason = end.data?.reason
+        const result = {
+          status: reason?.kind === 'completed' ? 'replied' : 'turn-ended',
+          sessionId,
+          requestId,
+          turn,
+          reply: joinedReplies(replies),
+          cursor,
+          waitedMs: Date.now() - startedAt,
+        }
+        if (reason?.kind !== 'completed') result.reason = reason
+        return result
+      }
+    }
+
+    const state = typeof controller.state === 'function'
+      ? await controller.state({ sessionId }, AbortSignal.timeout(10000))
+      : undefined
+    if (Array.isArray(state?.pendingInput) && state.pendingInput.length > 0) {
+      const partialReply = joinedReplies(replies)
+      return {
+        status: 'input-required',
+        sessionId,
+        requestId,
+        ...(turn === undefined ? {} : { turn }),
+        pendingInput: state.pendingInput,
+        ...(partialReply === '' ? {} : { partialReply }),
+        cursor,
+        waitedMs: Date.now() - startedAt,
+      }
+    }
+    if (Date.now() >= deadline) {
+      const partialReply = joinedReplies(replies)
+      return {
+        status: 'timeout',
+        sessionId,
+        requestId,
+        timeoutSeconds: timeoutMs / 1000,
+        ...(turn === undefined ? {} : { turn }),
+        ...(partialReply === '' ? {} : { partialReply }),
+        cursor,
+        waitedMs: Date.now() - startedAt,
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, Math.max(0, deadline - Date.now()))))
+  }
 }
 
 /**
@@ -212,17 +347,7 @@ export function createBridgeServer(controller, token, options = {}) {
           status = 400
           return json(res, status, { error: 'limit must be 1-100' })
         }
-        // `events` replaced `inspect` in newer DSH releases; keep both for older hosts.
-        const usesEvents = typeof controller.events === 'function'
-        const result = usesEvents
-          ? await controller.events({
-            address: { kind: 'session', sessionId },
-            maxMessages: count,
-          }, AbortSignal.timeout(10000))
-          : await controller.inspect(sessionId, AbortSignal.timeout(10000))
-        const events = usesEvents
-          ? result.records.slice(-count).map((record) => record.event)
-          : result.events.slice(-count)
+        const events = await readSessionEvents(controller, sessionId, count, AbortSignal.timeout(10000))
         status = 200
         return json(res, status, { sessionId, events })
       }
@@ -238,6 +363,20 @@ export function createBridgeServer(controller, token, options = {}) {
           status = 400
           return json(res, status, { error: `text must be 1-${MAX_TEXT} bytes` })
         }
+        let waitSeconds
+        const wait = url.searchParams.get('wait')
+        if (wait !== null) {
+          if (wait !== '1' && wait !== 'true') {
+            status = 400
+            return json(res, status, { error: 'wait must be 1 or true' })
+          }
+          const rawTimeout = url.searchParams.get('timeout')
+          waitSeconds = rawTimeout === null ? WAIT_DEFAULT_SECONDS : Number(rawTimeout)
+          if (!Number.isSafeInteger(waitSeconds) || waitSeconds < 1 || waitSeconds > WAIT_MAX_SECONDS) {
+            status = 400
+            return json(res, status, { error: `timeout must be an integer from 1 to ${WAIT_MAX_SECONDS} seconds` })
+          }
+        }
         const requestId = randomUUID()
         const result = await controller.prompt({
           sessionId,
@@ -246,6 +385,10 @@ export function createBridgeServer(controller, token, options = {}) {
           mode: 'queue',
         }, AbortSignal.timeout(15000))
         status = 200
+        if (waitSeconds !== undefined) {
+          const waited = await waitForRequest(controller, sessionId, requestId, { timeoutMs: waitSeconds * 1000 })
+          return json(res, status, { accepted: result.accepted, ...waited })
+        }
         return json(res, status, { accepted: result.accepted, requestId })
       }
 

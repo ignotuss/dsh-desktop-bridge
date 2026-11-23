@@ -136,6 +136,32 @@ Requests carrying a browser `Origin` header are refused, and `Host` must name th
 loopback address and port, so a web page cannot reach the bridge even by DNS
 rebinding.
 
+### Wait for the turn
+
+`send` returns after admission by default. Add `--wait` to wait for the turn
+that belongs to this request, not merely for the session to become idle:
+
+```bash
+dsh-desktop-bridge send session-1f0e…-… --wait --timeout 45 "Keep going until the tests pass."
+```
+
+`--timeout` is in seconds, defaults to 30, and accepts 1–3600. The command prints
+JSON with `status`:
+
+- `replied` — the turn completed; `turn` and `reply` hold the assistant text.
+- `input-required` — the host is waiting for a human; `pendingInput` names
+  `approval`, `question` or `other`.
+- `timeout` — the deadline passed; `timeoutSeconds` is echoed and the accepted
+  prompt is left running, not cancelled or resent.
+- `turn-ended` — the turn ended for another reason; `reason` records it.
+
+Exit codes are `0` replied, `124` timeout, `3` input-required, `1` other
+turn/HTTP failure, and `2` usage. Without `--wait`, `send` keeps the immediate
+`{accepted, requestId}` response. The wait follows the request id and its turn,
+so an earlier queued turn or another session cannot become the result. The same
+wait is available as `?wait=1&timeout=<seconds>` on
+`POST /v1/sessions/{id}/messages`.
+
 ## Configuration
 
 The plugin reads an optional `config` block from its patch row; every key is
@@ -186,7 +212,7 @@ mounting a half-working bridge.
 ## Development
 
 ```bash
-node --test          # 24 tests: routing, policy, audit, descriptor lifecycle
+node --test          # 41 tests: routing, policy, audit, wait correlation, descriptor lifecycle
 ```
 
 The tests bind ephemeral loopback ports and use a stub controller, so they need

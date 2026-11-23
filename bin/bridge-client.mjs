@@ -12,9 +12,24 @@ const USAGE = `Usage:
   dsh-desktop-bridge create <directory> [title...]
   dsh-desktop-bridge events <session-id> [limit]
   dsh-desktop-bridge send <session-id> <text...>
+  dsh-desktop-bridge send <session-id> --wait [--timeout <seconds>] <text...>
 
 The bridge must be enabled in DSH; the descriptor it publishes at
 $DSH_HOME/desktop-bridge.json carries the port and the bearer token.`
+
+const DEFAULT_WAIT_SECONDS = 30
+
+function usageError(message) {
+  if (message !== undefined) console.error(message)
+  console.error(USAGE)
+  process.exit(2)
+}
+
+function parseWaitTimeout(raw) {
+  if (!/^[1-9][0-9]*$/.test(raw ?? '')) return undefined
+  const seconds = Number(raw)
+  return Number.isSafeInteger(seconds) && seconds >= 1 && seconds <= 3600 ? seconds : undefined
+}
 
 const [command, ...rest] = process.argv.slice(2)
 
@@ -42,6 +57,7 @@ if (connection.address !== '127.0.0.1' || !Number.isInteger(connection.port) || 
 const root = `http://127.0.0.1:${connection.port}/v1/sessions`
 let url
 let init = { headers: { authorization: `Bearer ${connection.token}` } }
+let waitMode = false
 
 if (command === 'list') {
   url = root
@@ -56,9 +72,41 @@ if (command === 'list') {
 } else if (command === 'events' && rest.length > 0) {
   const [sessionId, limit] = rest
   url = `${root}/${encodeURIComponent(sessionId)}/events${limit === undefined ? '' : `?limit=${encodeURIComponent(limit)}`}`
-} else if (command === 'send' && rest.length > 1) {
-  const [sessionId, ...text] = rest
-  url = `${root}/${encodeURIComponent(sessionId)}/messages`
+} else if (command === 'send') {
+  let sessionId
+  let wait = false
+  let timeout = DEFAULT_WAIT_SECONDS
+  let timeoutGiven = false
+  let options = true
+  const text = []
+  for (let index = 0; index < rest.length; index += 1) {
+    const argument = rest[index]
+    if (options && argument === '--') { options = false; continue }
+    if (options && argument === '--wait') { wait = true; continue }
+    if (options && argument === '--timeout') {
+      if (index + 1 >= rest.length) usageError('--timeout requires a value')
+      const parsed = parseWaitTimeout(rest[index + 1])
+      if (parsed === undefined) usageError('--timeout must be an integer from 1 to 3600 seconds')
+      timeout = parsed
+      timeoutGiven = true
+      index += 1
+      continue
+    }
+    if (options && argument.startsWith('--timeout=')) {
+      const parsed = parseWaitTimeout(argument.slice('--timeout='.length))
+      if (parsed === undefined) usageError('--timeout must be an integer from 1 to 3600 seconds')
+      timeout = parsed
+      timeoutGiven = true
+      continue
+    }
+    if (options && argument.startsWith('--')) usageError(`unknown option: ${argument}`)
+    if (sessionId === undefined) { sessionId = argument; continue }
+    text.push(argument)
+  }
+  if (sessionId === undefined || text.length === 0) usageError()
+  if (timeoutGiven && !wait) usageError('--timeout requires --wait')
+  waitMode = wait
+  url = `${root}/${encodeURIComponent(sessionId)}/messages${wait ? `?wait=1&timeout=${timeout}` : ''}`
   init = {
     method: 'POST',
     headers: { ...init.headers, 'content-type': 'application/json' },
@@ -72,10 +120,17 @@ if (command === 'list') {
 try {
   const response = await fetch(url, init)
   const body = await response.text()
+  let parsed
   try {
-    console.log(JSON.stringify(JSON.parse(body), null, 2))
+    parsed = JSON.parse(body)
+    console.log(JSON.stringify(parsed, null, 2))
   } catch {
     console.log(body)
+  }
+  if (waitMode && parsed !== undefined && typeof parsed.status === 'string') {
+    if (parsed.status === 'timeout') process.exitCode = 124
+    else if (parsed.status === 'input-required') process.exitCode = 3
+    else if (parsed.status === 'turn-ended') process.exitCode = 1
   }
   if (!response.ok) process.exitCode = 1
 } catch {

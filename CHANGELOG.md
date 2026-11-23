@@ -10,6 +10,14 @@
   keeping the `inspect` fallback for older releases.
 - Send prompts with the documented `queue` mode.
 
+**Added**
+
+- `send --wait [--timeout <seconds>]` waits for the turn carrying the request
+  and returns script-friendly JSON; without `--wait`, `send` keeps its immediate
+  `{accepted, requestId}` response. The wait uses the request id and turn, leaves
+  an accepted prompt running on timeout, and reports `input-required`
+  separately.
+
 ## 0.1.0 — 2026-10-02
 
 First public release (`npm publish` at 2026-10-02T02:54:12Z, shasum

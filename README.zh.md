@@ -119,6 +119,28 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
 带浏览器 `Origin` 头的请求一律拒绝，且 `Host` 必须写明回环地址与端口——因此网页即使
 通过 DNS 重绑定也够不着这个桥。
 
+### 等待本轮回复
+
+默认的 `send` 在请求被接收后立即返回。加 `--wait` 后，等待**本次请求所属的 turn**
+完成，而不是只等会话进入空闲：
+
+```bash
+dsh-desktop-bridge send session-1f0e…-… --wait --timeout 45 "跑完测试再回复。"
+```
+
+`--timeout` 单位秒，默认 30，允许 1–3600。命令输出 JSON，其中 `status` 为：
+
+- `replied` —— turn 已完成；`turn` 和 `reply` 是回复文本。
+- `input-required` —— 宿主在等人处理；`pendingInput` 为 `approval`、`question` 或
+  `other`。
+- `timeout` —— 超时；`timeoutSeconds` 原样返回，已接收的请求继续运行，不取消、不重发。
+- `turn-ended` —— turn 因其他原因结束；`reason` 记录原因。
+
+退出码：`0` 已回复，`124` 超时，`3` 需要人工输入，`1` 其他 turn/HTTP 失败，`2` 用法
+错误。不带 `--wait` 时，`send` 保持原来的立即响应 `{accepted, requestId}`。等待按
+request id 和 turn 归属，因此队列里前一轮或其他会话的回复不会变成结果。HTTP 调用也可
+使用 `POST /v1/sessions/{id}/messages?wait=1&timeout=<秒>`。
+
 ## 配置
 
 插件会读取补丁行里可选的 `config`，每个键都可省略，省略时即为下面这种宽松默认值：
@@ -162,7 +184,7 @@ CLI 提示进入同一会话并在界面显示回复，CLI 可读回。
 ## 开发
 
 ```bash
-node --test          # 24 个测试：路由、策略、审计、descriptor 生命周期
+node --test          # 41 个测试：路由、策略、审计、等待归属、descriptor 生命周期
 ```
 
 测试占用临时回环端口并使用桩 controller，不需要跑着 DSH。
