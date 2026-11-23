@@ -143,10 +143,18 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
 
 ## 兼容性
 
-已在 DSH `0.2.0-rc.2`（desktop profile，Windows）上验证。插件只是五个
-`sessionController` 方法之上的薄层——`list`、`inspect`、`prompt`、`create`、
-`rename`——不依赖其他内部 API。若某个 DSH 版本改了方法名，相应路由会返回
-`500 DSH request failed`，真实错误写进审计日志，应用其他部分不受影响。
+兼容性按已发布的 `@deepseek-ai/dsh-api-session-controller` 类型契约核对：
+DSH `0.2.0-rc.2` 提供 `inspect`，DSH `0.2.2-rc.5` 提供 `events`。插件优先用
+`events`，旧版回退 `inspect`。两个契约都把 `prompt` 的 `mode` 定义为
+`queue | steer`，因此发消息使用 `queue`。
+
+已在 macOS DSH NEXT 2.0.24-next（内置 DSH 0.2.2-rc.5）实测：桌面未退出，
+CLI 提示进入同一会话并在界面显示回复，CLI 可读回。
+
+插件只是五个 `sessionController` 方法之上的薄层——`list`、`inspect`/`events`、
+`prompt`、`create`、`rename`——不依赖其他内部 API。若某个 DSH 版本改了方法名，
+相应路由会返回 `500 DSH request failed`，真实错误写进审计日志，应用其他部分
+不受影响。
 
 注入不到服务时，插件会在启动日志里报 `sessionController is unavailable`，而不是挂载
 一个半死不活的桥。
@@ -154,7 +162,7 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
 ## 开发
 
 ```bash
-node --test          # 23 个测试：路由、策略、审计、descriptor 生命周期
+node --test          # 24 个测试：路由、策略、审计、descriptor 生命周期
 ```
 
 测试占用临时回环端口并使用桩 controller，不需要跑着 DSH。

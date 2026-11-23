@@ -212,9 +212,19 @@ export function createBridgeServer(controller, token, options = {}) {
           status = 400
           return json(res, status, { error: 'limit must be 1-100' })
         }
-        const result = await controller.inspect(sessionId, AbortSignal.timeout(10000))
+        // `events` replaced `inspect` in newer DSH releases; keep both for older hosts.
+        const usesEvents = typeof controller.events === 'function'
+        const result = usesEvents
+          ? await controller.events({
+            address: { kind: 'session', sessionId },
+            maxMessages: count,
+          }, AbortSignal.timeout(10000))
+          : await controller.inspect(sessionId, AbortSignal.timeout(10000))
+        const events = usesEvents
+          ? result.records.slice(-count).map((record) => record.event)
+          : result.events.slice(-count)
         status = 200
-        return json(res, status, { sessionId, events: result.events.slice(-count) })
+        return json(res, status, { sessionId, events })
       }
 
       if (req.method === 'POST' && match[2] === 'messages') {
@@ -233,7 +243,7 @@ export function createBridgeServer(controller, token, options = {}) {
           sessionId,
           requestId,
           content: [{ type: 'text', text: data.text }],
-          mode: 'followup',
+          mode: 'queue',
         }, AbortSignal.timeout(15000))
         status = 200
         return json(res, status, { accepted: result.accepted, requestId })
@@ -270,11 +280,12 @@ export function createBridgeServer(controller, token, options = {}) {
  * release both when the plugin unloads.
  *
  * @param ctx - the Cordis plugin context; `sessionController` must be present.
+ * @param config - the patch entry's `config` object, if any.
  */
-export async function apply(ctx) {
+export async function apply(ctx, config) {
   const controller = ctx.sessionController
   if (!controller) throw new Error('sessionController is unavailable')
-  const options = resolveOptions(ctx.config)
+  const options = resolveOptions(config)
   const home = process.env.DSH_HOME || join(homedir(), '.dsh')
   const descriptorPath = join(home, 'desktop-bridge.json')
   const logPath = join(home, 'desktop-bridge.log')

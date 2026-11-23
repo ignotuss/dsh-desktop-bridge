@@ -163,11 +163,21 @@ does not create them.
 
 ## Compatibility
 
-Verified against DSH `0.2.0-rc.2` (desktop profile, Windows). The plugin is a
-thin layer over five `sessionController` methods — `list`, `inspect`, `prompt`,
-`create`, `rename` — and depends on no other internal API. If a DSH release
-renames them, the affected route answers `500 DSH request failed` and the real
-message is written to the audit log; nothing else in the app is disturbed.
+The bridge is checked against the published
+`@deepseek-ai/dsh-api-session-controller` type contracts. DSH `0.2.0-rc.2`
+exposes `inspect`; DSH `0.2.2-rc.5` exposes `events`. The bridge uses `events`
+when present and falls back to `inspect` for older releases. Both contracts
+document `prompt` mode `queue | steer`, so the bridge sends `queue`.
+
+On macOS DSH NEXT 2.0.24-next (bundled DSH 0.2.2-rc.5), the desktop stayed
+running, a CLI prompt reached the same session and its reply appeared in the UI,
+and the CLI read it back.
+
+The plugin is a thin layer over five `sessionController` methods — `list`,
+`inspect`/`events`, `prompt`, `create`, `rename` — and depends on no other
+internal API. If a DSH release renames them, the affected route answers `500 DSH
+request failed` and the real message is written to the audit log; nothing else in
+the app is disturbed.
 
 An install that fails for a missing service reports
 `sessionController is unavailable` in the plugin's startup log rather than
@@ -176,7 +186,7 @@ mounting a half-working bridge.
 ## Development
 
 ```bash
-node --test          # 23 tests: routing, policy, audit, descriptor lifecycle
+node --test          # 24 tests: routing, policy, audit, descriptor lifecycle
 ```
 
 The tests bind ephemeral loopback ports and use a stub controller, so they need
