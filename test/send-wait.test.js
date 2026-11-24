@@ -196,3 +196,62 @@ test('stops observing when the waiting client disconnects', async () => {
     await server.close()
   }
 })
+
+test('bounds a stalled pre-read and returns accepted:false without sending', async () => {
+  let promptCalls = 0
+  const controller = {
+    prompt: async () => { promptCalls += 1; return { accepted: true } },
+    events: async (request, signal) => new Promise((resolve, reject) => {
+      const abort = () => reject(signal.reason)
+      if (signal.aborted) abort()
+      else signal.addEventListener('abort', abort, { once: true })
+    }),
+    state: async () => ({ pendingInput: [] }),
+  }
+  const server = await start(controller)
+  try {
+    const started = Date.now()
+    const response = await post(server.base, '/v1/sessions/' + SESSION + '/messages?wait=1&timeout=1', { text: 'ping' })
+    assert.equal(response.status, 200)
+    const body = await response.json()
+    assert.equal(body.accepted, false)
+    assert.equal(body.status, 'timeout')
+    assert.ok(Date.now() - started < 2500, 'the pre-read must share the wait budget')
+    assert.equal(promptCalls, 0, 'the prompt must not be sent when the pre-read times out')
+  } finally { await server.close() }
+})
+
+test('does not send after a pre-read when the client disconnects', async () => {
+  let startedResolve
+  const started = new Promise((resolve) => { startedResolve = resolve })
+  let promptCalls = 0
+  const controller = {
+    prompt: async () => { promptCalls += 1; return { accepted: true } },
+    events: async () => {
+      startedResolve()
+      await new Promise((done) => setTimeout(done, 200))
+      return { records: [], cursor: 0, hasMore: false }
+    },
+    state: async () => ({ pendingInput: [] }),
+  }
+  const server = await start(controller)
+  const req = httpRequest({
+    host: '127.0.0.1',
+    port: server.port,
+    path: '/v1/sessions/' + SESSION + '/messages?wait=1&timeout=5',
+    method: 'POST',
+    headers: { authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' },
+  })
+  req.on('error', () => {})
+  try {
+    req.end(JSON.stringify({ text: 'ping' }))
+    await started
+    req.destroy()
+    await new Promise((done) => setTimeout(done, 400))
+    assert.equal(promptCalls, 0, 'a disconnected pre-read must not submit the prompt')
+  } finally {
+    req.destroy()
+    server.server.closeAllConnections?.()
+    await server.close()
+  }
+})

@@ -203,6 +203,9 @@ export async function waitForRequest(controller, sessionId, requestId, options =
   const pollMs = Number.isFinite(options.pollIntervalMs) && options.pollIntervalMs >= 0
     ? options.pollIntervalMs
     : WAIT_POLL_MS
+  const declaredTimeoutSeconds = Number.isFinite(options.timeoutSeconds) && options.timeoutSeconds > 0
+    ? options.timeoutSeconds
+    : timeoutMs / 1000
   const startedAt = Date.now()
   const deadline = startedAt + timeoutMs
   const waitController = new AbortController()
@@ -231,7 +234,7 @@ export async function waitForRequest(controller, sessionId, requestId, options =
       status: 'timeout',
       sessionId,
       requestId,
-      timeoutSeconds: timeoutMs / 1000,
+      timeoutSeconds: declaredTimeoutSeconds,
       ...(turn === undefined ? {} : { turn }),
       ...(partialReply === '' ? {} : { partialReply }),
       cursor,
@@ -499,42 +502,90 @@ export function createBridgeServer(controller, token, options = {}) {
             return json(res, status, { error: `timeout must be an integer from 1 to ${WAIT_MAX_SECONDS} seconds` })
           }
         }
-        let waitBaseline
-        if (waitSeconds !== undefined) {
-          waitBaseline = await readSessionCursor(controller, sessionId, AbortSignal.timeout(10000))
+
+        if (waitSeconds === undefined) {
+          const requestId = randomUUID()
+          const result = await controller.prompt({
+            sessionId,
+            requestId,
+            content: [{ type: 'text', text: data.text }],
+            mode: 'queue',
+          }, AbortSignal.timeout(15000))
+          status = 200
+          return json(res, status, { accepted: result.accepted, requestId })
         }
-        const requestId = randomUUID()
-        const result = await controller.prompt({
-          sessionId,
-          requestId,
-          content: [{ type: 'text', text: data.text }],
-          mode: 'queue',
-        }, AbortSignal.timeout(15000))
-        status = 200
-        if (waitSeconds !== undefined) {
-          // The response stays open until the wait resolves; the CLI uses
-          // node:http for this request so undici's response-header default does
-          // not cap long waits. A client disconnect stops only observation; it
-          // never cancels the prompt already accepted by the Agent.
-          const clientAbort = new AbortController()
-          const disconnect = () => clientAbort.abort(new Error('client disconnected'))
-          if (res.destroyed) disconnect()
-          res.once('close', disconnect)
-          req.once('aborted', disconnect)
-          try {
-            const waited = await waitForRequest(controller, sessionId, requestId, {
-              timeoutMs: waitSeconds * 1000,
-              afterSeq: waitBaseline,
-              signal: clientAbort.signal,
+
+        const waitStartedAt = Date.now()
+        const waitDeadline = waitStartedAt + waitSeconds * 1000
+        const clientAbort = new AbortController()
+        const disconnect = () => clientAbort.abort(new Error('client disconnected'))
+        if (res.destroyed) disconnect()
+        res.once('close', disconnect)
+        req.once('aborted', disconnect)
+        try {
+          const baselineRemaining = waitDeadline - Date.now()
+          if (baselineRemaining <= 0) {
+            status = 200
+            return json(res, status, {
+              accepted: false,
+              status: 'timeout',
+              timeoutSeconds: waitSeconds,
+              waitedMs: Date.now() - waitStartedAt,
             })
-            if (waited.status === 'disconnected' || res.destroyed) return
-            return json(res, status, { accepted: result.accepted, ...waited })
-          } finally {
-            res.off('close', disconnect)
-            req.off('aborted', disconnect)
           }
+          const baselineSignal = AbortSignal.any([
+            clientAbort.signal,
+            AbortSignal.timeout(baselineRemaining),
+          ])
+          let waitBaseline
+          try {
+            waitBaseline = await readSessionCursor(controller, sessionId, baselineSignal)
+          } catch (error) {
+            if (clientAbort.signal.aborted || res.destroyed) return
+            if (baselineSignal.aborted || Date.now() >= waitDeadline) {
+              status = 200
+              return json(res, status, {
+                accepted: false,
+                status: 'timeout',
+                timeoutSeconds: waitSeconds,
+                waitedMs: Date.now() - waitStartedAt,
+              })
+            }
+            throw error
+          }
+          if (clientAbort.signal.aborted || res.destroyed) return
+
+          const requestId = randomUUID()
+          const result = await controller.prompt({
+            sessionId,
+            requestId,
+            content: [{ type: 'text', text: data.text }],
+            mode: 'queue',
+          }, AbortSignal.timeout(15000))
+          status = 200
+          if (clientAbort.signal.aborted || res.destroyed) return
+          const remaining = waitDeadline - Date.now()
+          if (remaining <= 0) {
+            return json(res, status, {
+              accepted: result.accepted,
+              requestId,
+              status: 'timeout',
+              timeoutSeconds: waitSeconds,
+              waitedMs: Date.now() - waitStartedAt,
+            })
+          }
+          const waited = await waitForRequest(controller, sessionId, requestId, {
+            timeoutMs: remaining,
+            timeoutSeconds: waitSeconds,
+            afterSeq: waitBaseline,
+            signal: clientAbort.signal,
+          })
+          if (waited.status === 'disconnected' || res.destroyed) return
+          return json(res, status, { accepted: result.accepted, ...waited })
+        } finally {
+          res.off('close', disconnect)
+          req.off('aborted', disconnect)
         }
-        return json(res, status, { accepted: result.accepted, requestId })
       }
 
       status = 405

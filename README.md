@@ -158,7 +158,10 @@ JSON with `status`:
 Closing the waiting connection stops observation only; the accepted prompt keeps
 running. Before reporting `input-required`, the bridge re-reads and checks the
 terminal state of the request turn, so a later turn's pending input is not
-attributed to an earlier completed request.
+attributed to an earlier completed request. The wait budget also covers the
+pre-send cursor read: if it expires before the prompt is accepted, the result is
+`{accepted: false, status: "timeout"}` and no prompt was sent. Ordinary `send`
+never performs this pre-read.
 
 Exit codes are `0` replied, `124` timeout, `3` input-required, `1` other
 turn/HTTP failure, `2` usage, and `4` when the host returned only an immediate
@@ -234,7 +237,7 @@ mounting a half-working bridge.
 ## Development
 
 ```bash
-node --test          # 50 tests: routing, policy, audit, wait correlation, descriptor lifecycle
+node --test          # 52 tests: routing, policy, audit, wait correlation, descriptor lifecycle
 ```
 
 The tests bind ephemeral loopback ports and use a stub controller, so they need

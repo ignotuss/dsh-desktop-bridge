@@ -22,7 +22,9 @@
   stops at the first text word, so literal `--help` prompts keep working; `--`
   escapes a leading reserved option. A waiting client disconnect stops observation
   without cancelling the accepted prompt, and `input-required` is reported only
-  after rechecking the request turn's terminal state.
+  after rechecking the request turn's terminal state. The wait budget also covers
+  the pre-send cursor read, returning `accepted: false` if it expires before the
+  prompt is submitted; ordinary send skips that read.
 
 ## 0.1.0 — 2026-10-02
 
