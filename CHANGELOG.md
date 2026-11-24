@@ -17,7 +17,10 @@
   `{accepted, requestId}` response. The wait uses the request id and turn, pages
   back to a pre-send cursor so a busy log cannot hide the request or reply,
   bounds observation calls by the remaining timeout, leaves an accepted prompt
-  running on timeout, and reports `input-required` separately.
+  running on timeout, reports `input-required` separately, and exits 4 rather
+  than 0 when an older host returns only an immediate acceptance. Option parsing
+  stops at the first text word, so literal `--help` prompts keep working; `--`
+  escapes a leading reserved option.
 
 ## 0.1.0 — 2026-10-02
 

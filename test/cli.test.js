@@ -123,3 +123,42 @@ test('wait transport tolerates delayed response headers', async () => {
     assert.equal(JSON.parse(result.stdout).status, 'replied')
   })
 })
+
+test('send --wait exits 4 when an older host only confirms the prompt', async () => {
+  await withBridge(async () => ({
+    body: { accepted: true, requestId: 'request-1' },
+  }), async ({ runCli, requests }) => {
+    const result = await runCli(['send', SESSION, '--wait', '--timeout', '2', 'hello'])
+    assert.equal(result.code, 4)
+    assert.equal(JSON.parse(result.stdout).accepted, true)
+    assert.match(result.stderr, /accepted the prompt|request was submitted/i)
+    assert.match(result.stderr, /do not resend/i)
+    assert.equal(requests.filter((request) => request.url.includes('/messages')).length, 1)
+  })
+})
+
+test('ordinary send keeps literal --help text', async () => {
+  await withBridge(async () => ({
+    body: { accepted: true, requestId: 'request-1' },
+  }), async ({ runCli, requests }) => {
+    const first = await runCli(['send', SESSION, '--help'])
+    assert.equal(first.code, 0)
+    assert.equal(JSON.parse(requests[0].body).text, '--help')
+    assert.equal(new URL('http://127.0.0.1' + requests[0].url).searchParams.has('wait'), false)
+
+    const second = await runCli(['send', SESSION, 'hello', '--help', 'world'])
+    assert.equal(second.code, 0)
+    assert.equal(JSON.parse(requests[1].body).text, 'hello --help world')
+  })
+})
+
+test('-- sends a reserved option as literal text', async () => {
+  await withBridge(async () => ({
+    body: { accepted: true, requestId: 'request-1' },
+  }), async ({ runCli, requests }) => {
+    const result = await runCli(['send', SESSION, '--', '--wait'])
+    assert.equal(result.code, 0)
+    assert.equal(JSON.parse(requests[0].body).text, '--wait')
+    assert.equal(new URL('http://127.0.0.1' + requests[0].url).searchParams.has('wait'), false)
+  })
+})

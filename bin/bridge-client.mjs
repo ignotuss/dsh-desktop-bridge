@@ -13,7 +13,7 @@ const USAGE = `Usage:
   dsh-desktop-bridge create <directory> [title...]
   dsh-desktop-bridge events <session-id> [limit]
   dsh-desktop-bridge send <session-id> <text...>
-  dsh-desktop-bridge send <session-id> --wait [--timeout <seconds>] <text...>
+  dsh-desktop-bridge send <session-id> --wait [--timeout <seconds>] [--] <text...>
 
 The bridge must be enabled in DSH; the descriptor it publishes at
 $DSH_HOME/desktop-bridge.json carries the port and the bearer token.`
@@ -123,8 +123,12 @@ if (command === 'list') {
       timeoutGiven = true
       continue
     }
-    if (options && argument.startsWith('--')) usageError(`unknown option: ${argument}`)
-    if (sessionId === undefined) { sessionId = argument; continue }
+    if (sessionId === undefined) {
+      if (options && argument.startsWith('--')) usageError(`unknown option: ${argument}`)
+      sessionId = argument
+      continue
+    }
+    options = false
     text.push(argument)
   }
   if (sessionId === undefined || text.length === 0) usageError()
@@ -162,12 +166,20 @@ try {
   } catch {
     console.log(body)
   }
-  if (waitMode && parsed !== undefined && typeof parsed.status === 'string') {
-    if (parsed.status === 'timeout') process.exitCode = 124
-    else if (parsed.status === 'input-required') process.exitCode = 3
-    else if (parsed.status === 'turn-ended') process.exitCode = 1
+  const ok = status >= 200 && status < 300
+  if (waitMode && ok) {
+    const terminal = parsed !== undefined && typeof parsed.status === 'string' ? parsed.status : undefined
+    if (terminal === 'timeout') process.exitCode = 124
+    else if (terminal === 'input-required') process.exitCode = 3
+    else if (terminal === 'turn-ended') process.exitCode = 1
+    else if (terminal !== 'replied') {
+      console.error(parsed !== undefined && parsed.accepted === true
+        ? 'The bridge accepted the prompt but returned no wait terminal status; the request was submitted. Do not resend it automatically. The host may be older or the plugin was not reloaded.'
+        : 'The bridge returned no wait terminal status; no completion was observed. Do not resend automatically.')
+      process.exitCode = 4
+    }
   }
-  if (!(status >= 200 && status < 300)) process.exitCode = 1
+  if (!ok) process.exitCode = 1
 } catch {
   console.error('Cannot reach the DSH desktop bridge.')
   console.error('If the plugin was just reloaded, its port and token changed — rerun to pick them up.')

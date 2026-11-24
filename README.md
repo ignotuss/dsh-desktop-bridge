@@ -156,14 +156,28 @@ JSON with `status`:
 - `turn-ended` — the turn ended for another reason; `reason` records it.
 
 Exit codes are `0` replied, `124` timeout, `3` input-required, `1` other
-turn/HTTP failure, and `2` usage. Without `--wait`, `send` keeps the immediate
-`{accepted, requestId}` response. The wait follows the request id and its turn,
-so an earlier queued turn or another session cannot become the result. The wait
-pages back to a cursor captured before the prompt, so a busy event log does not
-hide the request or its reply. Observation reads are bounded by the remaining
-timeout, and the CLI uses a native HTTP request so the declared `--timeout` is
-not capped by a default fetch header timeout. The same wait is available as
-`?wait=1&timeout=<seconds>` on `POST /v1/sessions/{id}/messages`.
+turn/HTTP failure, `2` usage, and `4` when the host returned only an immediate
+acceptance instead of a wait terminal status. Exit `4` means the prompt was
+submitted but no completion was observed; the caller must not resend it
+automatically (the host may be older, or the plugin was not reloaded). Without
+`--wait`, `send` keeps the immediate `{accepted, requestId}` response. The wait
+follows the request id and its turn, so an earlier queued turn or another session
+cannot become the result. The wait pages back to a cursor captured before the
+prompt, so a busy event log does not hide the request or its reply. Observation
+reads are bounded by the remaining timeout, and the CLI uses a native HTTP
+request so the declared `--timeout` is not capped by a default fetch header
+timeout. The same wait is available as `?wait=1&timeout=<seconds>` on
+`POST /v1/sessions/{id}/messages`.
+
+A prompt that would otherwise start with a reserved option (`--wait` or
+`--timeout`) can be sent literally with `--`:
+
+```bash
+dsh-desktop-bridge send <session-id> -- --wait
+```
+
+Once the first text word is seen, later tokens are text, so an ordinary prompt
+containing `--help` is unchanged.
 
 ## Configuration
 
@@ -215,7 +229,7 @@ mounting a half-working bridge.
 ## Development
 
 ```bash
-node --test          # 45 tests: routing, policy, audit, wait correlation, descriptor lifecycle
+node --test          # 48 tests: routing, policy, audit, wait correlation, descriptor lifecycle
 ```
 
 The tests bind ephemeral loopback ports and use a stub controller, so they need

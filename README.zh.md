@@ -137,11 +137,21 @@ dsh-desktop-bridge send session-1f0e…-… --wait --timeout 45 "跑完测试再
 - `turn-ended` —— turn 因其他原因结束；`reason` 记录原因。
 
 退出码：`0` 已回复，`124` 超时，`3` 需要人工输入，`1` 其他 turn/HTTP 失败，`2` 用法
-错误。不带 `--wait` 时，`send` 保持原来的立即响应 `{accepted, requestId}`。等待按
-request id 和 turn 归属，因此队列里前一轮或其他会话的回复不会变成结果。等待会从发送前
-记录的游标向后分页，繁忙的事件日志不会吞掉本次请求或回复。观察调用受剩余超时约束；
-CLI 的等待请求使用原生 HTTP，不会被 fetch 默认响应头超时截断。HTTP 调用也可使用
+错误，`4` 表示宿主只返回了立即确认、没有等待终态。退出 `4` 说明提示词已提交但未观察到
+完成；调用方不要自动重发（宿主可能是旧版，或插件未重新加载）。不带 `--wait` 时，`send`
+保持原来的立即响应 `{accepted, requestId}`。等待按 request id 和 turn 归属，因此队列里
+前一轮或其他会话的回复不会变成结果。等待会从发送前记录的游标向后分页，繁忙的事件日志
+不会吞掉本次请求或回复。观察调用受剩余超时约束；CLI 的等待请求使用原生 HTTP，不会被
+fetch 默认响应头超时截断。HTTP 调用也可使用
 `POST /v1/sessions/{id}/messages?wait=1&timeout=<秒>`。
+
+如果提示词本身要以保留选项（`--wait` 或 `--timeout`）开头，用 `--` 转义：
+
+```bash
+dsh-desktop-bridge send <session-id> -- --wait
+```
+
+第一个文本词出现后，后续词都按文本处理，因此普通提示词里的 `--help` 不受影响。
 
 ## 配置
 
@@ -186,7 +196,7 @@ CLI 提示进入同一会话并在界面显示回复，CLI 可读回。
 ## 开发
 
 ```bash
-node --test          # 45 个测试：路由、策略、审计、等待归属、descriptor 生命周期
+node --test          # 48 个测试：路由、策略、审计、等待归属、descriptor 生命周期
 ```
 
 测试占用临时回环端口并使用桩 controller，不需要跑着 DSH。
