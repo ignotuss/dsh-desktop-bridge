@@ -155,6 +155,11 @@ JSON with `status`:
   prompt is left running, not cancelled or resent.
 - `turn-ended` — the turn ended for another reason; `reason` records it.
 
+Closing the waiting connection stops observation only; the accepted prompt keeps
+running. Before reporting `input-required`, the bridge re-reads and checks the
+terminal state of the request turn, so a later turn's pending input is not
+attributed to an earlier completed request.
+
 Exit codes are `0` replied, `124` timeout, `3` input-required, `1` other
 turn/HTTP failure, `2` usage, and `4` when the host returned only an immediate
 acceptance instead of a wait terminal status. Exit `4` means the prompt was
@@ -229,7 +234,7 @@ mounting a half-working bridge.
 ## Development
 
 ```bash
-node --test          # 48 tests: routing, policy, audit, wait correlation, descriptor lifecycle
+node --test          # 50 tests: routing, policy, audit, wait correlation, descriptor lifecycle
 ```
 
 The tests bind ephemeral loopback ports and use a stub controller, so they need

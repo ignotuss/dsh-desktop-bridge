@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
+import { request as httpRequest } from 'node:http'
 import { createBridgeServer } from '../src/index.js'
 
 const TOKEN = 'test-token'
@@ -11,6 +12,7 @@ async function start(controller) {
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
   return {
+    server,
     port: server.address().port,
     base: 'http://127.0.0.1:' + server.address().port,
     close: () => new Promise((done) => server.close(done)),
@@ -145,4 +147,52 @@ test('rejects an invalid wait timeout before sending', async () => {
     assert.equal((await post(server.base, '/v1/sessions/' + SESSION + '/messages?wait=1&timeout=0', { text: 'ping' })).status, 400)
     assert.equal(promptCalls, 0)
   } finally { await server.close() }
+})
+
+test('stops observing when the waiting client disconnects', async () => {
+  let requestId
+  let promptCalls = 0
+  const eventCalls = []
+  const controller = {
+    prompt: async (payload) => { promptCalls += 1; requestId = payload.requestId; return { accepted: true } },
+    events: async (request) => {
+      eventCalls.push(request.maxMessages)
+      if (request.maxMessages === 1) return { records: [], cursor: 0, hasMore: false }
+      return {
+        records: [
+          { type: 'event', event: { seq: 1, type: 'turn/start', data: { turn: 1 } } },
+          { type: 'event', event: { seq: 2, type: 'user/message', data: { source: { rpcId: requestId } } } },
+        ],
+        cursor: 2,
+        hasMore: false,
+      }
+    },
+    state: async () => ({ pendingInput: [] }),
+  }
+  const server = await start(controller)
+  const req = httpRequest({
+    host: '127.0.0.1',
+    port: server.port,
+    path: '/v1/sessions/' + SESSION + '/messages?wait=1&timeout=5',
+    method: 'POST',
+    headers: { authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' },
+  })
+  req.on('error', () => {})
+  try {
+    req.end(JSON.stringify({ text: 'ping' }))
+    const deadline = Date.now() + 2000
+    while (eventCalls.length < 2) {
+      if (Date.now() > deadline) throw new Error('wait route did not start observing')
+      await new Promise((done) => setTimeout(done, 10))
+    }
+    const afterStart = eventCalls.length
+    req.destroy()
+    await new Promise((done) => setTimeout(done, 500))
+    assert.equal(eventCalls.length, afterStart, 'observation must stop after the client disconnects')
+    assert.equal(promptCalls, 1, 'the accepted prompt must not be cancelled or resent')
+  } finally {
+    req.destroy()
+    server.server.closeAllConnections?.()
+    await server.close()
+  }
 })

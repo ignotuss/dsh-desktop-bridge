@@ -197,3 +197,34 @@ test('bounds a hanging state RPC by the remaining wait timeout', async () => {
   assert.equal(result.status, 'timeout')
   assert.ok(Date.now() - started < 500, 'the state read must not outlive the wait deadline')
 })
+
+test('rechecks the request turn before reporting a later turn pending input', async () => {
+  let calls = 0
+  const partial = [
+    { seq: 1, type: 'turn/start', data: { turn: 1 } },
+    { seq: 2, type: 'user/message', data: { source: { rpcId: REQUEST } } },
+    { seq: 3, type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: 'done' }] } } },
+  ]
+  const completed = [
+    ...partial,
+    { seq: 4, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+  ]
+  const controller = {
+    events: async () => {
+      const events = calls === 0 ? partial : completed
+      calls += 1
+      return {
+        records: events.map((event) => ({ type: 'event', event })),
+        cursor: events.at(-1)?.seq ?? 0,
+        hasMore: false,
+      }
+    },
+    state: async () => ({ pendingInput: ['question'] }),
+  }
+  const result = await waitForRequest(controller, SESSION, REQUEST, {
+    timeoutMs: 1000, pollIntervalMs: 1,
+  })
+  assert.equal(result.status, 'replied')
+  assert.equal(result.turn, 1)
+  assert.equal(result.reply, 'done')
+})

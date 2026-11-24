@@ -208,6 +208,16 @@ export async function waitForRequest(controller, sessionId, requestId, options =
   const waitController = new AbortController()
   const waitSignal = waitController.signal
   const deadlineTimer = setTimeout(() => waitController.abort(new Error('wait timeout')), timeoutMs)
+  const clientSignal = options.signal
+  let disconnected = false
+  const disconnect = () => {
+    disconnected = true
+    waitController.abort(clientSignal?.reason ?? new Error('client disconnected'))
+  }
+  if (clientSignal !== undefined) {
+    if (clientSignal.aborted) disconnect()
+    else clientSignal.addEventListener('abort', disconnect, { once: true })
+  }
   const assistantByTurn = new Map()
   let lastSeq = Number.isSafeInteger(options.afterSeq) ? options.afterSeq : -1
   let cursor = Math.max(0, lastSeq)
@@ -229,55 +239,76 @@ export async function waitForRequest(controller, sessionId, requestId, options =
     }
   }
 
+  const disconnectedResult = () => ({
+    status: 'disconnected',
+    sessionId,
+    requestId,
+    cursor,
+    waitedMs: Date.now() - startedAt,
+  })
+
+  const absorb = (events) => {
+    for (const event of events) {
+      if (Number.isInteger(event?.seq) && event.seq > cursor) cursor = event.seq
+      if (Number.isInteger(event?.seq) && event.seq > lastSeq) lastSeq = event.seq
+      if (event?.type === 'assistant/message' && Number.isInteger(event?.data?.turn)) {
+        let bySeq = assistantByTurn.get(event.data.turn)
+        if (bySeq === undefined) {
+          bySeq = new Map()
+          assistantByTurn.set(event.data.turn, bySeq)
+        }
+        bySeq.set(event.seq, assistantText(event))
+      }
+    }
+
+    const requestEvent = events.find((event) => event?.type === 'user/message'
+      && event?.data?.source?.rpcId === requestId)
+    if (requestEvent) userSeq = requestEvent.seq
+    if (turn === undefined && userSeq !== undefined) {
+      const turnEvent = events.find((event) => event?.seq > userSeq && Number.isInteger(event?.data?.turn))
+      if (turnEvent) turn = turnEvent.data.turn
+    }
+
+    replies = turn === undefined ? new Map() : (assistantByTurn.get(turn) ?? new Map())
+    if (turn === undefined) return undefined
+    return events.find((event) => event?.type === 'turn/end' && event?.data?.turn === turn)
+  }
+
+  const turnResult = (end) => {
+    const reason = end.data?.reason
+    const result = {
+      status: reason?.kind === 'completed' ? 'replied' : 'turn-ended',
+      sessionId,
+      requestId,
+      turn,
+      reply: joinedReplies(replies),
+      cursor,
+      waitedMs: Date.now() - startedAt,
+    }
+    if (reason?.kind !== 'completed') result.reason = reason
+    return result
+  }
+
+  const readMore = async () => {
+    const events = await readEventsAfter(controller, sessionId, lastSeq, waitSignal)
+    return absorb(events)
+  }
+
   try {
     while (true) {
+      if (disconnected) return disconnectedResult()
       if (waitSignal.aborted || Date.now() >= deadline) return timeoutResult()
-      let events
+
+      let end
       try {
-        events = await readEventsAfter(controller, sessionId, lastSeq, waitSignal)
+        end = await readMore()
       } catch (error) {
+        if (disconnected) return disconnectedResult()
         if (waitSignal.aborted || Date.now() >= deadline) return timeoutResult()
         throw error
       }
-      for (const event of events) {
-        if (Number.isInteger(event?.seq) && event.seq > cursor) cursor = event.seq
-        if (Number.isInteger(event?.seq) && event.seq > lastSeq) lastSeq = event.seq
-        if (event?.type === 'assistant/message' && Number.isInteger(event?.data?.turn)) {
-          let bySeq = assistantByTurn.get(event.data.turn)
-          if (bySeq === undefined) {
-            bySeq = new Map()
-            assistantByTurn.set(event.data.turn, bySeq)
-          }
-          bySeq.set(event.seq, assistantText(event))
-        }
-      }
-
-      const requestEvent = events.find((event) => event?.type === 'user/message'
-        && event?.data?.source?.rpcId === requestId)
-      if (requestEvent) userSeq = requestEvent.seq
-      if (turn === undefined && userSeq !== undefined) {
-        const turnEvent = events.find((event) => event?.seq > userSeq && Number.isInteger(event?.data?.turn))
-        if (turnEvent) turn = turnEvent.data.turn
-      }
-
-      replies = turn === undefined ? new Map() : (assistantByTurn.get(turn) ?? new Map())
-      if (turn !== undefined) {
-        const end = events.find((event) => event?.type === 'turn/end' && event?.data?.turn === turn)
-        if (end) {
-          const reason = end.data?.reason
-          const result = {
-            status: reason?.kind === 'completed' ? 'replied' : 'turn-ended',
-            sessionId,
-            requestId,
-            turn,
-            reply: joinedReplies(replies),
-            cursor,
-            waitedMs: Date.now() - startedAt,
-          }
-          if (reason?.kind !== 'completed') result.reason = reason
-          return result
-        }
-      }
+      if (disconnected) return disconnectedResult()
+      if (end) return turnResult(end)
 
       let state
       try {
@@ -285,10 +316,25 @@ export async function waitForRequest(controller, sessionId, requestId, options =
           ? await controller.state({ sessionId }, waitSignal)
           : undefined
       } catch (error) {
+        if (disconnected) return disconnectedResult()
         if (waitSignal.aborted || Date.now() >= deadline) return timeoutResult()
         throw error
       }
+      if (disconnected) return disconnectedResult()
+
       if (Array.isArray(state?.pendingInput) && state.pendingInput.length > 0) {
+        // The session-level input may belong to a later turn. Re-read the
+        // request turn before attributing it to this request.
+        let endAfterState
+        try {
+          endAfterState = await readMore()
+        } catch (error) {
+          if (disconnected) return disconnectedResult()
+          if (waitSignal.aborted || Date.now() >= deadline) return timeoutResult()
+          throw error
+        }
+        if (disconnected) return disconnectedResult()
+        if (endAfterState) return turnResult(endAfterState)
         const partialReply = joinedReplies(replies)
         return {
           status: 'input-required',
@@ -301,6 +347,7 @@ export async function waitForRequest(controller, sessionId, requestId, options =
           waitedMs: Date.now() - startedAt,
         }
       }
+
       if (waitSignal.aborted || Date.now() >= deadline) return timeoutResult()
       const remaining = deadline - Date.now()
       if (remaining <= 0) return timeoutResult()
@@ -308,6 +355,7 @@ export async function waitForRequest(controller, sessionId, requestId, options =
     }
   } finally {
     clearTimeout(deadlineTimer)
+    if (clientSignal !== undefined) clientSignal.removeEventListener('abort', disconnect)
   }
 }
 
@@ -466,12 +514,25 @@ export function createBridgeServer(controller, token, options = {}) {
         if (waitSeconds !== undefined) {
           // The response stays open until the wait resolves; the CLI uses
           // node:http for this request so undici's response-header default does
-          // not cap long waits.
-          const waited = await waitForRequest(controller, sessionId, requestId, {
-            timeoutMs: waitSeconds * 1000,
-            afterSeq: waitBaseline,
-          })
-          return json(res, status, { accepted: result.accepted, ...waited })
+          // not cap long waits. A client disconnect stops only observation; it
+          // never cancels the prompt already accepted by the Agent.
+          const clientAbort = new AbortController()
+          const disconnect = () => clientAbort.abort(new Error('client disconnected'))
+          if (res.destroyed) disconnect()
+          res.once('close', disconnect)
+          req.once('aborted', disconnect)
+          try {
+            const waited = await waitForRequest(controller, sessionId, requestId, {
+              timeoutMs: waitSeconds * 1000,
+              afterSeq: waitBaseline,
+              signal: clientAbort.signal,
+            })
+            if (waited.status === 'disconnected' || res.destroyed) return
+            return json(res, status, { accepted: result.accepted, ...waited })
+          } finally {
+            res.off('close', disconnect)
+            req.off('aborted', disconnect)
+          }
         }
         return json(res, status, { accepted: result.accepted, requestId })
       }

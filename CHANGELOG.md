@@ -20,7 +20,9 @@
   running on timeout, reports `input-required` separately, and exits 4 rather
   than 0 when an older host returns only an immediate acceptance. Option parsing
   stops at the first text word, so literal `--help` prompts keep working; `--`
-  escapes a leading reserved option.
+  escapes a leading reserved option. A waiting client disconnect stops observation
+  without cancelling the accepted prompt, and `input-required` is reported only
+  after rechecking the request turn's terminal state.
 
 ## 0.1.0 — 2026-10-02
 
