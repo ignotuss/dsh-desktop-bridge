@@ -517,53 +517,79 @@ export function createBridgeServer(controller, token, options = {}) {
 
         const waitStartedAt = Date.now()
         const waitDeadline = waitStartedAt + waitSeconds * 1000
+        const waitBudget = new AbortController()
+        const budgetTimer = setTimeout(() => waitBudget.abort(new Error('wait budget')), Math.max(1, waitDeadline - Date.now()))
         const clientAbort = new AbortController()
         const disconnect = () => clientAbort.abort(new Error('client disconnected'))
         if (res.destroyed) disconnect()
         res.once('close', disconnect)
         req.once('aborted', disconnect)
+        const acceptedFalseTimeout = () => {
+          status = 200
+          return json(res, status, {
+            accepted: false,
+            status: 'timeout',
+            timeoutSeconds: waitSeconds,
+            waitedMs: Date.now() - waitStartedAt,
+          })
+        }
+        const submissionUnknownTimeout = (requestId) => {
+          status = 200
+          return json(res, status, {
+            status: 'timeout',
+            requestId,
+            submission: 'unknown',
+            timeoutSeconds: waitSeconds,
+            waitedMs: Date.now() - waitStartedAt,
+          })
+        }
+        const abortOutcome = (signal, kind) => new Promise((resolve) => {
+          if (signal.aborted) resolve({ kind })
+          else signal.addEventListener('abort', () => resolve({ kind }), { once: true })
+        })
         try {
           const baselineRemaining = waitDeadline - Date.now()
-          if (baselineRemaining <= 0) {
-            status = 200
-            return json(res, status, {
-              accepted: false,
-              status: 'timeout',
-              timeoutSeconds: waitSeconds,
-              waitedMs: Date.now() - waitStartedAt,
-            })
-          }
+          if (baselineRemaining <= 0) return acceptedFalseTimeout()
           const baselineSignal = AbortSignal.any([
             clientAbort.signal,
-            AbortSignal.timeout(baselineRemaining),
+            waitBudget.signal,
           ])
           let waitBaseline
           try {
             waitBaseline = await readSessionCursor(controller, sessionId, baselineSignal)
           } catch (error) {
             if (clientAbort.signal.aborted || res.destroyed) return
-            if (baselineSignal.aborted || Date.now() >= waitDeadline) {
-              status = 200
-              return json(res, status, {
-                accepted: false,
-                status: 'timeout',
-                timeoutSeconds: waitSeconds,
-                waitedMs: Date.now() - waitStartedAt,
-              })
-            }
+            if (waitBudget.signal.aborted || Date.now() >= waitDeadline) return acceptedFalseTimeout()
             throw error
           }
           if (clientAbort.signal.aborted || res.destroyed) return
+          if (waitBudget.signal.aborted || Date.now() >= waitDeadline) return acceptedFalseTimeout()
 
           const requestId = randomUUID()
-          const result = await controller.prompt({
+          const promptCall = controller.prompt({
             sessionId,
             requestId,
             content: [{ type: 'text', text: data.text }],
             mode: 'queue',
           }, AbortSignal.timeout(15000))
+          const promptOutcome = promptCall.then((result) => ({ kind: 'result', result }))
+          promptOutcome.catch(() => {})
+          let outcome
+          try {
+            outcome = await Promise.race([
+              promptOutcome,
+              abortOutcome(clientAbort.signal, 'client'),
+              abortOutcome(waitBudget.signal, 'budget'),
+            ])
+          } catch (error) {
+            if (clientAbort.signal.aborted) return
+            if (waitBudget.signal.aborted) return submissionUnknownTimeout(requestId)
+            throw error
+          }
+          if (outcome.kind === 'client' || clientAbort.signal.aborted || res.destroyed) return
+          if (outcome.kind === 'budget' || waitBudget.signal.aborted) return submissionUnknownTimeout(requestId)
+          const result = outcome.result
           status = 200
-          if (clientAbort.signal.aborted || res.destroyed) return
           const remaining = waitDeadline - Date.now()
           if (remaining <= 0) {
             return json(res, status, {
@@ -583,6 +609,7 @@ export function createBridgeServer(controller, token, options = {}) {
           if (waited.status === 'disconnected' || res.destroyed) return
           return json(res, status, { accepted: result.accepted, ...waited })
         } finally {
+          clearTimeout(budgetTimer)
           res.off('close', disconnect)
           req.off('aborted', disconnect)
         }

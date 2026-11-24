@@ -134,6 +134,9 @@ dsh-desktop-bridge send session-1f0e…-… --wait --timeout 45 "跑完测试再
 - `input-required` —— 宿主在等人处理；`pendingInput` 为 `approval`、`question` 或
   `other`。
 - `timeout` —— 超时；`timeoutSeconds` 原样返回，已接收的请求继续运行，不取消、不重发。
+  如果已经调用 prompt 但在期限前没收到接收确认，结果还会带 `requestId` 和
+  `submission: "unknown"`，请求可能仍在运行，不能重发；尚未提交时则返回
+  `accepted: false`。
 - `turn-ended` —— turn 因其他原因结束；`reason` 记录原因。
 
 等待连接断开只结束观察，已接收的提示词继续运行。返回 `input-required` 前，桥接会补读
@@ -201,7 +204,7 @@ CLI 提示进入同一会话并在界面显示回复，CLI 可读回。
 ## 开发
 
 ```bash
-node --test          # 52 个测试：路由、策略、审计、等待归属、descriptor 生命周期
+node --test          # 53 个测试：路由、策略、审计、等待归属、descriptor 生命周期
 ```
 
 测试占用临时回环端口并使用桩 controller，不需要跑着 DSH。

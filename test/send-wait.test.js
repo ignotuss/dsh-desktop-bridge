@@ -255,3 +255,40 @@ test('does not send after a pre-read when the client disconnects', async () => {
     await server.close()
   }
 })
+
+test('returns before a slow prompt admission and reports submission unknown', async () => {
+  let promptCalls = 0
+  let promptSettled = false
+  let promptDoneResolve
+  const promptDone = new Promise((resolve) => { promptDoneResolve = resolve })
+  const controller = {
+    prompt: async () => {
+      promptCalls += 1
+      await new Promise((done) => setTimeout(done, 1800))
+      promptSettled = true
+      promptDoneResolve()
+      return { accepted: true }
+    },
+    events: async (request) => {
+      if (request.maxMessages === 1) return { records: [], cursor: 0, hasMore: false }
+      return { records: [], cursor: 0, hasMore: false }
+    },
+    state: async () => ({ pendingInput: [] }),
+  }
+  const server = await start(controller)
+  try {
+    const started = Date.now()
+    const response = await post(server.base, '/v1/sessions/' + SESSION + '/messages?wait=1&timeout=1', { text: 'ping' })
+    const elapsed = Date.now() - started
+    assert.equal(response.status, 200)
+    const body = await response.json()
+    assert.equal(body.status, 'timeout')
+    assert.equal(typeof body.requestId, 'string')
+    assert.equal(body.submission, 'unknown')
+    assert.equal(Object.hasOwn(body, 'accepted'), false)
+    assert.ok(elapsed < 1600, 'the response must use the wait budget, not the prompt latency')
+    assert.equal(promptCalls, 1)
+    await promptDone
+    assert.equal(promptSettled, true, 'the late prompt must still be allowed to complete')
+  } finally { await server.close() }
+})

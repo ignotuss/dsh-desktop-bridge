@@ -152,7 +152,10 @@ JSON with `status`:
 - `input-required` — the host is waiting for a human; `pendingInput` names
   `approval`, `question` or `other`.
 - `timeout` — the deadline passed; `timeoutSeconds` is echoed and the accepted
-  prompt is left running, not cancelled or resent.
+  prompt is left running, not cancelled or resent. If the prompt call was made
+  but admission was not confirmed before the deadline, the result also carries
+  `requestId` and `submission: "unknown"`; it may still run and must not be
+  resent. Before submission the result carries `accepted: false` instead.
 - `turn-ended` — the turn ended for another reason; `reason` records it.
 
 Closing the waiting connection stops observation only; the accepted prompt keeps
@@ -237,7 +240,7 @@ mounting a half-working bridge.
 ## Development
 
 ```bash
-node --test          # 52 tests: routing, policy, audit, wait correlation, descriptor lifecycle
+node --test          # 53 tests: routing, policy, audit, wait correlation, descriptor lifecycle
 ```
 
 The tests bind ephemeral loopback ports and use a stub controller, so they need

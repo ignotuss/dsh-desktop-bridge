@@ -24,7 +24,9 @@
   without cancelling the accepted prompt, and `input-required` is reported only
   after rechecking the request turn's terminal state. The wait budget also covers
   the pre-send cursor read, returning `accepted: false` if it expires before the
-  prompt is submitted; ordinary send skips that read.
+  prompt is submitted; ordinary send skips that read. Prompt admission itself is
+  raced against the same budget: if it is still unconfirmed, the result carries
+  the request id and `submission: "unknown"` while the prompt continues.
 
 ## 0.1.0 — 2026-10-02
 
