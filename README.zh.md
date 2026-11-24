@@ -119,6 +119,48 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
 带浏览器 `Origin` 头的请求一律拒绝，且 `Host` 必须写明回环地址与端口——因此网页即使
 通过 DNS 重绑定也够不着这个桥。
 
+### 等待本轮回复
+
+默认的 `send` 在请求被接收后立即返回。加 `--wait` 后，等待**本次请求所属的 turn**
+完成，而不是只等会话进入空闲：
+
+```bash
+dsh-desktop-bridge send session-1f0e…-… --wait --timeout 45 "跑完测试再回复。"
+```
+
+`--timeout` 单位秒，默认 30，允许 1–3600。命令输出 JSON，其中 `status` 为：
+
+- `replied` —— turn 已完成；`turn` 和 `reply` 是回复文本。
+- `input-required` —— 宿主在等人处理；`pendingInput` 为 `approval`、`question` 或
+  `other`。
+- `timeout` —— 超时；`timeoutSeconds` 原样返回，已接收的请求继续运行，不取消、不重发。
+  如果已经调用 prompt 但在期限前没收到接收确认，结果还会带 `requestId` 和
+  `submission: "unknown"`，请求可能仍在运行，不能重发；尚未提交时则返回
+  `accepted: false`。
+- `turn-ended` —— turn 因其他原因结束；`reason` 记录原因。
+
+等待连接断开只结束观察，已接收的提示词继续运行。返回 `input-required` 前，桥接会补读
+并核对本次请求所属 turn 的终态，避免把后续 turn 的人工输入算到已完成的请求上。等待预算
+也覆盖发送前的游标预读：若在提示词被接受前耗尽，返回
+`{accepted: false, status: "timeout"}`，且没有发送提示词。普通 `send` 不做这次预读。
+
+退出码：`0` 已回复，`124` 超时，`3` 需要人工输入，`1` 其他 turn/HTTP 失败，`2` 用法
+错误，`4` 表示宿主只返回了立即确认、没有等待终态。退出 `4` 说明提示词已提交但未观察到
+完成；调用方不要自动重发（宿主可能是旧版，或插件未重新加载）。不带 `--wait` 时，`send`
+保持原来的立即响应 `{accepted, requestId}`。等待按 request id 和 turn 归属，因此队列里
+前一轮或其他会话的回复不会变成结果。等待会从发送前记录的游标向后分页，繁忙的事件日志
+不会吞掉本次请求或回复。观察调用受剩余超时约束；CLI 的等待请求使用原生 HTTP，不会被
+fetch 默认响应头超时截断。HTTP 调用也可使用
+`POST /v1/sessions/{id}/messages?wait=1&timeout=<秒>`。
+
+如果提示词本身要以保留选项（`--wait` 或 `--timeout`）开头，用 `--` 转义：
+
+```bash
+dsh-desktop-bridge send <session-id> -- --wait
+```
+
+第一个文本词出现后，后续词都按文本处理，因此普通提示词里的 `--help` 不受影响。
+
 ## 配置
 
 插件会读取补丁行里可选的 `config`，每个键都可省略，省略时即为下面这种宽松默认值：
@@ -143,10 +185,18 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
 
 ## 兼容性
 
-已在 DSH `0.2.0-rc.2`（desktop profile，Windows）上验证。插件只是五个
-`sessionController` 方法之上的薄层——`list`、`inspect`、`prompt`、`create`、
-`rename`——不依赖其他内部 API。若某个 DSH 版本改了方法名，相应路由会返回
-`500 DSH request failed`，真实错误写进审计日志，应用其他部分不受影响。
+兼容性按已发布的 `@deepseek-ai/dsh-api-session-controller` 类型契约核对：
+DSH `0.2.0-rc.2` 提供 `inspect`，DSH `0.2.2-rc.5` 提供 `events`。插件优先用
+`events`，旧版回退 `inspect`。两个契约都把 `prompt` 的 `mode` 定义为
+`queue | steer`，因此发消息使用 `queue`。
+
+已在 macOS DSH NEXT 2.0.24-next（内置 DSH 0.2.2-rc.5）实测：桌面未退出，
+CLI 提示进入同一会话并在界面显示回复，CLI 可读回。
+
+插件只是五个 `sessionController` 方法之上的薄层——`list`、`inspect`/`events`、
+`prompt`、`create`、`rename`——不依赖其他内部 API。若某个 DSH 版本改了方法名，
+相应路由会返回 `500 DSH request failed`，真实错误写进审计日志，应用其他部分
+不受影响。
 
 注入不到服务时，插件会在启动日志里报 `sessionController is unavailable`，而不是挂载
 一个半死不活的桥。
@@ -154,7 +204,7 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
 ## 开发
 
 ```bash
-node --test          # 23 个测试：路由、策略、审计、descriptor 生命周期
+node --test          # 53 个测试：路由、策略、审计、等待归属、descriptor 生命周期
 ```
 
 测试占用临时回环端口并使用桩 controller，不需要跑着 DSH。

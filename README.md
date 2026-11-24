@@ -136,6 +136,60 @@ Requests carrying a browser `Origin` header are refused, and `Host` must name th
 loopback address and port, so a web page cannot reach the bridge even by DNS
 rebinding.
 
+### Wait for the turn
+
+`send` returns after admission by default. Add `--wait` to wait for the turn
+that belongs to this request, not merely for the session to become idle:
+
+```bash
+dsh-desktop-bridge send session-1f0e…-… --wait --timeout 45 "Keep going until the tests pass."
+```
+
+`--timeout` is in seconds, defaults to 30, and accepts 1–3600. The command prints
+JSON with `status`:
+
+- `replied` — the turn completed; `turn` and `reply` hold the assistant text.
+- `input-required` — the host is waiting for a human; `pendingInput` names
+  `approval`, `question` or `other`.
+- `timeout` — the deadline passed; `timeoutSeconds` is echoed and the accepted
+  prompt is left running, not cancelled or resent. If the prompt call was made
+  but admission was not confirmed before the deadline, the result also carries
+  `requestId` and `submission: "unknown"`; it may still run and must not be
+  resent. Before submission the result carries `accepted: false` instead.
+- `turn-ended` — the turn ended for another reason; `reason` records it.
+
+Closing the waiting connection stops observation only; the accepted prompt keeps
+running. Before reporting `input-required`, the bridge re-reads and checks the
+terminal state of the request turn, so a later turn's pending input is not
+attributed to an earlier completed request. The wait budget also covers the
+pre-send cursor read: if it expires before the prompt is accepted, the result is
+`{accepted: false, status: "timeout"}` and no prompt was sent. Ordinary `send`
+never performs this pre-read.
+
+Exit codes are `0` replied, `124` timeout, `3` input-required, `1` other
+turn/HTTP failure, `2` usage, and `4` when the host returned only an immediate
+acceptance instead of a wait terminal status. Exit `4` means the prompt was
+submitted but no completion was observed; the caller must not resend it
+automatically (the host may be older, or the plugin was not reloaded). Without
+`--wait`, `send` keeps the immediate `{accepted, requestId}` response. The wait
+follows the request id and its turn, so an earlier queued turn or another session
+cannot become the result. The wait pages back to a cursor captured before the
+prompt, so a busy event log does not hide the request or its reply. Observation
+reads are bounded by the remaining timeout, and the CLI uses a native HTTP
+request so the declared `--timeout` is not capped by a default fetch header
+timeout. The same wait is available as `?wait=1&timeout=<seconds>` on
+`POST /v1/sessions/{id}/messages`.
+
+A prompt that would otherwise start with a reserved option (`--wait` or
+`--timeout`) can be sent literally with `--`:
+
+```bash
+dsh-desktop-bridge send <session-id> -- --wait
+```
+
+Once the first text word is seen, later tokens are text, so an ordinary prompt
+containing `--help` is unchanged.
+
 ## Configuration
 
 The plugin reads an optional `config` block from its patch row; every key is
@@ -163,11 +217,21 @@ does not create them.
 
 ## Compatibility
 
-Verified against DSH `0.2.0-rc.2` (desktop profile, Windows). The plugin is a
-thin layer over five `sessionController` methods — `list`, `inspect`, `prompt`,
-`create`, `rename` — and depends on no other internal API. If a DSH release
-renames them, the affected route answers `500 DSH request failed` and the real
-message is written to the audit log; nothing else in the app is disturbed.
+The bridge is checked against the published
+`@deepseek-ai/dsh-api-session-controller` type contracts. DSH `0.2.0-rc.2`
+exposes `inspect`; DSH `0.2.2-rc.5` exposes `events`. The bridge uses `events`
+when present and falls back to `inspect` for older releases. Both contracts
+document `prompt` mode `queue | steer`, so the bridge sends `queue`.
+
+On macOS DSH NEXT 2.0.24-next (bundled DSH 0.2.2-rc.5), the desktop stayed
+running, a CLI prompt reached the same session and its reply appeared in the UI,
+and the CLI read it back.
+
+The plugin is a thin layer over five `sessionController` methods — `list`,
+`inspect`/`events`, `prompt`, `create`, `rename` — and depends on no other
+internal API. If a DSH release renames them, the affected route answers `500 DSH
+request failed` and the real message is written to the audit log; nothing else in
+the app is disturbed.
 
 An install that fails for a missing service reports
 `sessionController is unavailable` in the plugin's startup log rather than
@@ -176,7 +240,7 @@ mounting a half-working bridge.
 ## Development
 
 ```bash
-node --test          # 23 tests: routing, policy, audit, descriptor lifecycle
+node --test          # 53 tests: routing, policy, audit, wait correlation, descriptor lifecycle
 ```
 
 The tests bind ephemeral loopback ports and use a stub controller, so they need

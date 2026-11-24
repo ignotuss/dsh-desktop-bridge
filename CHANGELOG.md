@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- Pass the plugin config through Cordis's `apply(ctx, config)` contract instead
+  of reading `ctx.config`.
+- Read session events through `sessionController.events` on current DSH releases,
+  keeping the `inspect` fallback for older releases.
+- Send prompts with the documented `queue` mode.
+
+**Added**
+
+- `send --wait [--timeout <seconds>]` waits for the turn carrying the request
+  and returns script-friendly JSON; without `--wait`, `send` keeps its immediate
+  `{accepted, requestId}` response. The wait uses the request id and turn, pages
+  back to a pre-send cursor so a busy log cannot hide the request or reply,
+  bounds observation calls by the remaining timeout, leaves an accepted prompt
+  running on timeout, reports `input-required` separately, and exits 4 rather
+  than 0 when an older host returns only an immediate acceptance. Option parsing
+  stops at the first text word, so literal `--help` prompts keep working; `--`
+  escapes a leading reserved option. A waiting client disconnect stops observation
+  without cancelling the accepted prompt, and `input-required` is reported only
+  after rechecking the request turn's terminal state. The wait budget also covers
+  the pre-send cursor read, returning `accepted: false` if it expires before the
+  prompt is submitted; ordinary send skips that read. Prompt admission itself is
+  raced against the same budget: if it is still unconfirmed, the result carries
+  the request id and `submission: "unknown"` while the prompt continues.
+
 ## 0.1.0 — 2026-10-02
 
 First public release (`npm publish` at 2026-10-02T02:54:12Z, shasum
