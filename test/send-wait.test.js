@@ -48,16 +48,19 @@ test('send with wait returns the completed turn result', async () => {
   let promptCalls = 0
   const controller = {
     prompt: async (payload) => { promptCalls += 1; requestId = payload.requestId; return { accepted: true } },
-    events: async () => ({
-      records: [
-        { type: 'event', event: { seq: 1, type: 'turn/start', data: { turn: 1 } } },
-        { type: 'event', event: { seq: 2, type: 'user/message', data: { source: { rpcId: requestId } } } },
-        { type: 'event', event: { seq: 3, type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: 'reply' }] } } } },
-        { type: 'event', event: { seq: 4, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } } },
-      ],
-      cursor: 4,
-      hasMore: false,
-    }),
+    events: async (request) => {
+      if (request.maxMessages === 1) return { records: [], cursor: 0, hasMore: false }
+      return {
+        records: [
+          { type: 'event', event: { seq: 1, type: 'turn/start', data: { turn: 1 } } },
+          { type: 'event', event: { seq: 2, type: 'user/message', data: { source: { rpcId: requestId } } } },
+          { type: 'event', event: { seq: 3, type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: 'reply' }] } } } },
+          { type: 'event', event: { seq: 4, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } } },
+        ],
+        cursor: 4,
+        hasMore: false,
+      }
+    },
     state: async () => ({ pendingInput: [] }),
   }
   const server = await start(controller)
@@ -78,15 +81,18 @@ test('send with wait reports input-required without cancelling', async () => {
   let promptCalls = 0
   const controller = {
     prompt: async (payload) => { promptCalls += 1; requestId = payload.requestId; return { accepted: true } },
-    events: async () => ({
-      records: [
-        { type: 'event', event: { seq: 1, type: 'turn/start', data: { turn: 1 } } },
-        { type: 'event', event: { seq: 2, type: 'user/message', data: { source: { rpcId: requestId } } } },
-        { type: 'event', event: { seq: 3, type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: 'need approval' }] } } } },
-      ],
-      cursor: 3,
-      hasMore: false,
-    }),
+    events: async (request) => {
+      if (request.maxMessages === 1) return { records: [], cursor: 0, hasMore: false }
+      return {
+        records: [
+          { type: 'event', event: { seq: 1, type: 'turn/start', data: { turn: 1 } } },
+          { type: 'event', event: { seq: 2, type: 'user/message', data: { source: { rpcId: requestId } } } },
+          { type: 'event', event: { seq: 3, type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: 'need approval' }] } } } },
+        ],
+        cursor: 3,
+        hasMore: false,
+      }
+    },
     state: async () => ({ pendingInput: ['approval'] }),
   }
   const server = await start(controller)
@@ -105,14 +111,17 @@ test('send with wait reports timeout and keeps the accepted request', async () =
   let promptCalls = 0
   const controller = {
     prompt: async (payload) => { promptCalls += 1; requestId = payload.requestId; return { accepted: true } },
-    events: async () => ({
-      records: [
-        { type: 'event', event: { seq: 1, type: 'turn/start', data: { turn: 1 } } },
-        { type: 'event', event: { seq: 2, type: 'user/message', data: { source: { rpcId: requestId } } } },
-      ],
-      cursor: 2,
-      hasMore: false,
-    }),
+    events: async (request) => {
+      if (request.maxMessages === 1) return { records: [], cursor: 0, hasMore: false }
+      return {
+        records: [
+          { type: 'event', event: { seq: 1, type: 'turn/start', data: { turn: 1 } } },
+          { type: 'event', event: { seq: 2, type: 'user/message', data: { source: { rpcId: requestId } } } },
+        ],
+        cursor: 2,
+        hasMore: false,
+      }
+    },
     state: async () => ({ pendingInput: [] }),
   }
   const server = await start(controller)

@@ -4,6 +4,7 @@
 // It only reads the descriptor the plugin publishes under $DSH_HOME and speaks
 // the loopback HTTP API; it never touches a profile or a session file.
 import { readFile } from 'node:fs/promises'
+import { request as httpRequest } from 'node:http'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -29,6 +30,28 @@ function parseWaitTimeout(raw) {
   if (!/^[1-9][0-9]*$/.test(raw ?? '')) return undefined
   const seconds = Number(raw)
   return Number.isSafeInteger(seconds) && seconds >= 1 && seconds <= 3600 ? seconds : undefined
+}
+
+function requestJson(url, init, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(new URL(url), {
+      method: init.method,
+      headers: init.headers,
+      timeout: timeoutMs,
+    }, (res) => {
+      let body = ''
+      res.setEncoding('utf8')
+      res.on('data', (chunk) => { body += chunk })
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body }))
+      res.on('error', reject)
+    })
+    req.on('timeout', () => {
+      req.destroy(new Error('bridge response timed out'))
+    })
+    req.on('error', reject)
+    if (init.body !== undefined) req.write(init.body)
+    req.end()
+  })
 }
 
 const [command, ...rest] = process.argv.slice(2)
@@ -58,6 +81,7 @@ const root = `http://127.0.0.1:${connection.port}/v1/sessions`
 let url
 let init = { headers: { authorization: `Bearer ${connection.token}` } }
 let waitMode = false
+let waitTimeoutSeconds = 0
 
 if (command === 'list') {
   url = root
@@ -106,6 +130,7 @@ if (command === 'list') {
   if (sessionId === undefined || text.length === 0) usageError()
   if (timeoutGiven && !wait) usageError('--timeout requires --wait')
   waitMode = wait
+  waitTimeoutSeconds = timeout
   url = `${root}/${encodeURIComponent(sessionId)}/messages${wait ? `?wait=1&timeout=${timeout}` : ''}`
   init = {
     method: 'POST',
@@ -118,8 +143,18 @@ if (command === 'list') {
 }
 
 try {
-  const response = await fetch(url, init)
-  const body = await response.text()
+  let status
+  let body
+  if (waitMode) {
+    // The server sends headers only after the wait resolves. Use node:http
+    // here: unlike undici fetch it has no 300-second response-header default,
+    // and the socket timeout stays beyond the declared --timeout.
+    ({ status, body } = await requestJson(url, init, (waitTimeoutSeconds + 30) * 1000))
+  } else {
+    const response = await fetch(url, init)
+    status = response.status
+    body = await response.text()
+  }
   let parsed
   try {
     parsed = JSON.parse(body)
@@ -132,7 +167,7 @@ try {
     else if (parsed.status === 'input-required') process.exitCode = 3
     else if (parsed.status === 'turn-ended') process.exitCode = 1
   }
-  if (!response.ok) process.exitCode = 1
+  if (!(status >= 200 && status < 300)) process.exitCode = 1
 } catch {
   console.error('Cannot reach the DSH desktop bridge.')
   console.error('If the plugin was just reloaded, its port and token changed — rerun to pick them up.')

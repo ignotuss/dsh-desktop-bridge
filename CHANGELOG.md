@@ -14,9 +14,10 @@
 
 - `send --wait [--timeout <seconds>]` waits for the turn carrying the request
   and returns script-friendly JSON; without `--wait`, `send` keeps its immediate
-  `{accepted, requestId}` response. The wait uses the request id and turn, leaves
-  an accepted prompt running on timeout, and reports `input-required`
-  separately.
+  `{accepted, requestId}` response. The wait uses the request id and turn, pages
+  back to a pre-send cursor so a busy log cannot hide the request or reply,
+  bounds observation calls by the remaining timeout, leaves an accepted prompt
+  running on timeout, and reports `input-required` separately.
 
 ## 0.1.0 — 2026-10-02
 

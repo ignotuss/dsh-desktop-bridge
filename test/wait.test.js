@@ -127,3 +127,73 @@ test('reports a non-completed turn reason', async () => {
   assert.deepEqual(result.reason, { kind: 'error' })
   assert.equal(result.reply, 'stopped')
 })
+
+test('pages back to the request instead of trusting a fixed tail window', async () => {
+  const events = Array.from({ length: 300 }, (_, seq) => ({ seq, type: 'noise', data: {} }))
+  events[5] = { seq: 5, type: 'user/message', data: { source: { rpcId: REQUEST } } }
+  events[6] = { seq: 6, type: 'turn/start', data: { turn: 1 } }
+  events[297] = { seq: 297, type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: 'late reply' }] } } }
+  events[298] = { seq: 298, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } }
+  const controller = {
+    events: async (request) => {
+      const end = request.beforeSeq ?? events.length
+      const start = Math.max(0, end - (request.maxMessages ?? 200))
+      const page = events.slice(start, end)
+      return {
+        records: page.map((event) => ({ type: 'event', event })),
+        cursor: page.at(-1)?.seq ?? 0,
+        hasMore: start > 0,
+      }
+    },
+    state: async () => ({ pendingInput: [] }),
+  }
+  const result = await waitForRequest(controller, SESSION, REQUEST, {
+    timeoutMs: 1000, afterSeq: 0, pollIntervalMs: 1,
+  })
+  assert.equal(result.status, 'replied')
+  assert.equal(result.turn, 1)
+  assert.equal(result.reply, 'late reply')
+})
+
+test('bounds a hanging events RPC by the remaining wait timeout', async () => {
+  const controller = {
+    events: async (request, signal) => new Promise((resolve, reject) => {
+      const abort = () => reject(signal.reason)
+      if (signal.aborted) abort()
+      else signal.addEventListener('abort', abort, { once: true })
+    }),
+    state: async () => ({ pendingInput: [] }),
+  }
+  const started = Date.now()
+  const result = await waitForRequest(controller, SESSION, REQUEST, {
+    timeoutMs: 30, afterSeq: 0, pollIntervalMs: 1,
+  })
+  assert.equal(result.status, 'timeout')
+  assert.ok(Date.now() - started < 500, 'the observation must not outlive the wait deadline')
+})
+
+test('bounds a hanging state RPC by the remaining wait timeout', async () => {
+  const events = [
+    { seq: 1, type: 'turn/start', data: { turn: 1 } },
+    { seq: 2, type: 'user/message', data: { source: { rpcId: REQUEST } } },
+    { seq: 3, type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: 'partial' }] } } },
+  ]
+  const controller = {
+    events: async () => ({
+      records: events.map((event) => ({ type: 'event', event })),
+      cursor: 3,
+      hasMore: false,
+    }),
+    state: async (request, signal) => new Promise((resolve, reject) => {
+      const abort = () => reject(signal.reason)
+      if (signal.aborted) abort()
+      else signal.addEventListener('abort', abort, { once: true })
+    }),
+  }
+  const started = Date.now()
+  const result = await waitForRequest(controller, SESSION, REQUEST, {
+    timeoutMs: 30, afterSeq: 0, pollIntervalMs: 1,
+  })
+  assert.equal(result.status, 'timeout')
+  assert.ok(Date.now() - started < 500, 'the state read must not outlive the wait deadline')
+})

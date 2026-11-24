@@ -110,3 +110,16 @@ test('rejects --timeout without --wait before calling the bridge', async () => {
     assert.match(result.stderr, /requires --wait/)
   })
 })
+
+test('wait transport tolerates delayed response headers', async () => {
+  await withBridge(async () => {
+    await new Promise((done) => setTimeout(done, 1200))
+    return {
+      body: { status: 'replied', sessionId: SESSION, requestId: 'request-1', turn: 1, reply: 'hello' },
+    }
+  }, async ({ runCli }) => {
+    const result = await runCli(['send', SESSION, '--wait', '--timeout', '2', 'hello'])
+    assert.equal(result.code, 0)
+    assert.equal(JSON.parse(result.stdout).status, 'replied')
+  })
+})

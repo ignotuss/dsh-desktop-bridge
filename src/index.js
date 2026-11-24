@@ -17,7 +17,7 @@ const MAX_TITLE = 200
 const SESSION_ID = /^session-[0-9a-f-]{36}$/i
 const WAIT_DEFAULT_SECONDS = 30
 const WAIT_MAX_SECONDS = 3600
-const WAIT_EVENT_WINDOW = 200
+const WAIT_PAGE_MESSAGES = 200
 const WAIT_POLL_MS = 250
 
 function json(res, status, value) {
@@ -136,6 +136,55 @@ async function readSessionEvents(controller, sessionId, count, signal) {
   return result.events.slice(-count)
 }
 
+async function readSessionCursor(controller, sessionId, signal) {
+  if (typeof controller.events === 'function') {
+    const result = await controller.events({
+      address: { kind: 'session', sessionId },
+      maxMessages: 1,
+    }, signal)
+    if (Number.isSafeInteger(result.cursor)) return result.cursor
+    return result.records.at(-1)?.event?.seq ?? 0
+  }
+  const result = await controller.inspect(sessionId, signal)
+  return result.events.at(-1)?.seq ?? 0
+}
+
+async function readEventsAfter(controller, sessionId, afterSeq, signal) {
+  if (typeof controller.events !== 'function') {
+    const result = await controller.inspect(sessionId, signal)
+    return result.events.filter((event) => Number.isInteger(event?.seq) && event.seq > afterSeq)
+  }
+  const collected = new Map()
+  let throughSeq
+  let beforeSeq
+  while (true) {
+    signal.throwIfAborted()
+    const result = await controller.events({
+      address: { kind: 'session', sessionId },
+      maxMessages: WAIT_PAGE_MESSAGES,
+      ...(throughSeq === undefined ? {} : { throughSeq }),
+      ...(beforeSeq === undefined ? {} : { beforeSeq }),
+    }, signal)
+    const events = (result.records ?? []).map((record) => record.event)
+    if (throughSeq === undefined) {
+      throughSeq = Number.isSafeInteger(result.cursor)
+        ? result.cursor
+        : (events.at(-1)?.seq ?? afterSeq)
+    }
+    for (const event of events) {
+      if (Number.isInteger(event?.seq) && event.seq > afterSeq) collected.set(event.seq, event)
+    }
+    const first = events[0]?.seq
+    if (first === undefined || first <= afterSeq || result.hasMore !== true) break
+    if (beforeSeq !== undefined && first >= beforeSeq) break
+    beforeSeq = first
+    if (throughSeq <= afterSeq) break
+  }
+  return [...collected.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, event]) => event)
+}
+
 /**
  * Wait for the turn carrying one request to finish, without cancelling or
  * resending it. Session-level quiescence is not enough: another queued turn can
@@ -144,7 +193,7 @@ async function readSessionEvents(controller, sessionId, count, signal) {
  * @param controller - the host's `sessionController` service.
  * @param sessionId - the Session that received the prompt.
  * @param requestId - the client-minted request id returned by `prompt`.
- * @param options - `timeoutMs` and `pollIntervalMs` (the latter for tests).
+ * @param options - `timeoutMs`, `afterSeq` and `pollIntervalMs` (the latter for tests).
  * @returns a script-friendly wait result.
  */
 export async function waitForRequest(controller, sessionId, requestId, options = {}) {
@@ -156,84 +205,109 @@ export async function waitForRequest(controller, sessionId, requestId, options =
     : WAIT_POLL_MS
   const startedAt = Date.now()
   const deadline = startedAt + timeoutMs
+  const waitController = new AbortController()
+  const waitSignal = waitController.signal
+  const deadlineTimer = setTimeout(() => waitController.abort(new Error('wait timeout')), timeoutMs)
   const assistantByTurn = new Map()
+  let lastSeq = Number.isSafeInteger(options.afterSeq) ? options.afterSeq : -1
+  let cursor = Math.max(0, lastSeq)
   let userSeq
   let turn
-  let cursor = 0
+  let replies = new Map()
 
-  while (true) {
-    const events = await readSessionEvents(
-      controller, sessionId, WAIT_EVENT_WINDOW, AbortSignal.timeout(10000),
-    )
-    for (const event of events) {
-      if (Number.isInteger(event?.seq) && event.seq > cursor) cursor = event.seq
-      if (event?.type === 'assistant/message' && Number.isInteger(event?.data?.turn)) {
-        let replies = assistantByTurn.get(event.data.turn)
-        if (replies === undefined) {
-          replies = new Map()
-          assistantByTurn.set(event.data.turn, replies)
-        }
-        replies.set(event.seq, assistantText(event))
+  const timeoutResult = () => {
+    const partialReply = joinedReplies(replies)
+    return {
+      status: 'timeout',
+      sessionId,
+      requestId,
+      timeoutSeconds: timeoutMs / 1000,
+      ...(turn === undefined ? {} : { turn }),
+      ...(partialReply === '' ? {} : { partialReply }),
+      cursor,
+      waitedMs: Date.now() - startedAt,
+    }
+  }
+
+  try {
+    while (true) {
+      if (waitSignal.aborted || Date.now() >= deadline) return timeoutResult()
+      let events
+      try {
+        events = await readEventsAfter(controller, sessionId, lastSeq, waitSignal)
+      } catch (error) {
+        if (waitSignal.aborted || Date.now() >= deadline) return timeoutResult()
+        throw error
       }
-    }
+      for (const event of events) {
+        if (Number.isInteger(event?.seq) && event.seq > cursor) cursor = event.seq
+        if (Number.isInteger(event?.seq) && event.seq > lastSeq) lastSeq = event.seq
+        if (event?.type === 'assistant/message' && Number.isInteger(event?.data?.turn)) {
+          let bySeq = assistantByTurn.get(event.data.turn)
+          if (bySeq === undefined) {
+            bySeq = new Map()
+            assistantByTurn.set(event.data.turn, bySeq)
+          }
+          bySeq.set(event.seq, assistantText(event))
+        }
+      }
 
-    const requestEvent = events.find((event) => event?.type === 'user/message'
-      && event?.data?.source?.rpcId === requestId)
-    if (requestEvent) userSeq = requestEvent.seq
-    if (turn === undefined && userSeq !== undefined) {
-      const turnEvent = events.find((event) => event?.seq > userSeq && Number.isInteger(event?.data?.turn))
-      if (turnEvent) turn = turnEvent.data.turn
-    }
+      const requestEvent = events.find((event) => event?.type === 'user/message'
+        && event?.data?.source?.rpcId === requestId)
+      if (requestEvent) userSeq = requestEvent.seq
+      if (turn === undefined && userSeq !== undefined) {
+        const turnEvent = events.find((event) => event?.seq > userSeq && Number.isInteger(event?.data?.turn))
+        if (turnEvent) turn = turnEvent.data.turn
+      }
 
-    const replies = turn === undefined ? new Map() : (assistantByTurn.get(turn) ?? new Map())
-    if (turn !== undefined) {
-      const end = events.find((event) => event?.type === 'turn/end' && event?.data?.turn === turn)
-      if (end) {
-        const reason = end.data?.reason
-        const result = {
-          status: reason?.kind === 'completed' ? 'replied' : 'turn-ended',
+      replies = turn === undefined ? new Map() : (assistantByTurn.get(turn) ?? new Map())
+      if (turn !== undefined) {
+        const end = events.find((event) => event?.type === 'turn/end' && event?.data?.turn === turn)
+        if (end) {
+          const reason = end.data?.reason
+          const result = {
+            status: reason?.kind === 'completed' ? 'replied' : 'turn-ended',
+            sessionId,
+            requestId,
+            turn,
+            reply: joinedReplies(replies),
+            cursor,
+            waitedMs: Date.now() - startedAt,
+          }
+          if (reason?.kind !== 'completed') result.reason = reason
+          return result
+        }
+      }
+
+      let state
+      try {
+        state = typeof controller.state === 'function'
+          ? await controller.state({ sessionId }, waitSignal)
+          : undefined
+      } catch (error) {
+        if (waitSignal.aborted || Date.now() >= deadline) return timeoutResult()
+        throw error
+      }
+      if (Array.isArray(state?.pendingInput) && state.pendingInput.length > 0) {
+        const partialReply = joinedReplies(replies)
+        return {
+          status: 'input-required',
           sessionId,
           requestId,
-          turn,
-          reply: joinedReplies(replies),
+          ...(turn === undefined ? {} : { turn }),
+          pendingInput: state.pendingInput,
+          ...(partialReply === '' ? {} : { partialReply }),
           cursor,
           waitedMs: Date.now() - startedAt,
         }
-        if (reason?.kind !== 'completed') result.reason = reason
-        return result
       }
+      if (waitSignal.aborted || Date.now() >= deadline) return timeoutResult()
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) return timeoutResult()
+      await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, remaining)))
     }
-
-    const state = typeof controller.state === 'function'
-      ? await controller.state({ sessionId }, AbortSignal.timeout(10000))
-      : undefined
-    if (Array.isArray(state?.pendingInput) && state.pendingInput.length > 0) {
-      const partialReply = joinedReplies(replies)
-      return {
-        status: 'input-required',
-        sessionId,
-        requestId,
-        ...(turn === undefined ? {} : { turn }),
-        pendingInput: state.pendingInput,
-        ...(partialReply === '' ? {} : { partialReply }),
-        cursor,
-        waitedMs: Date.now() - startedAt,
-      }
-    }
-    if (Date.now() >= deadline) {
-      const partialReply = joinedReplies(replies)
-      return {
-        status: 'timeout',
-        sessionId,
-        requestId,
-        timeoutSeconds: timeoutMs / 1000,
-        ...(turn === undefined ? {} : { turn }),
-        ...(partialReply === '' ? {} : { partialReply }),
-        cursor,
-        waitedMs: Date.now() - startedAt,
-      }
-    }
-    await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, Math.max(0, deadline - Date.now()))))
+  } finally {
+    clearTimeout(deadlineTimer)
   }
 }
 
@@ -252,7 +326,7 @@ export function createBridgeServer(controller, token, options = {}) {
   const cwdAllowlist = Array.isArray(options.cwdAllowlist) ? options.cwdAllowlist : []
   const onAudit = typeof options.onAudit === 'function' ? options.onAudit : undefined
 
-  return createServer(async (req, res) => {
+  const server = createServer(async (req, res) => {
     const startedAt = Date.now()
     let status = 500
     let route = 'unmatched'
@@ -377,6 +451,10 @@ export function createBridgeServer(controller, token, options = {}) {
             return json(res, status, { error: `timeout must be an integer from 1 to ${WAIT_MAX_SECONDS} seconds` })
           }
         }
+        let waitBaseline
+        if (waitSeconds !== undefined) {
+          waitBaseline = await readSessionCursor(controller, sessionId, AbortSignal.timeout(10000))
+        }
         const requestId = randomUUID()
         const result = await controller.prompt({
           sessionId,
@@ -386,7 +464,13 @@ export function createBridgeServer(controller, token, options = {}) {
         }, AbortSignal.timeout(15000))
         status = 200
         if (waitSeconds !== undefined) {
-          const waited = await waitForRequest(controller, sessionId, requestId, { timeoutMs: waitSeconds * 1000 })
+          // The response stays open until the wait resolves; the CLI uses
+          // node:http for this request so undici's response-header default does
+          // not cap long waits.
+          const waited = await waitForRequest(controller, sessionId, requestId, {
+            timeoutMs: waitSeconds * 1000,
+            afterSeq: waitBaseline,
+          })
           return json(res, status, { accepted: result.accepted, ...waited })
         }
         return json(res, status, { accepted: result.accepted, requestId })
@@ -416,6 +500,10 @@ export function createBridgeServer(controller, token, options = {}) {
       }
     }
   })
+  // The wait route holds its response until the requested deadline; keep the
+  // server's socket inactivity timeout out of long waits.
+  server.timeout = 0
+  return server
 }
 
 /**

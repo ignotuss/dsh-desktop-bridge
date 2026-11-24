@@ -158,9 +158,12 @@ JSON with `status`:
 Exit codes are `0` replied, `124` timeout, `3` input-required, `1` other
 turn/HTTP failure, and `2` usage. Without `--wait`, `send` keeps the immediate
 `{accepted, requestId}` response. The wait follows the request id and its turn,
-so an earlier queued turn or another session cannot become the result. The same
-wait is available as `?wait=1&timeout=<seconds>` on
-`POST /v1/sessions/{id}/messages`.
+so an earlier queued turn or another session cannot become the result. The wait
+pages back to a cursor captured before the prompt, so a busy event log does not
+hide the request or its reply. Observation reads are bounded by the remaining
+timeout, and the CLI uses a native HTTP request so the declared `--timeout` is
+not capped by a default fetch header timeout. The same wait is available as
+`?wait=1&timeout=<seconds>` on `POST /v1/sessions/{id}/messages`.
 
 ## Configuration
 
@@ -212,7 +215,7 @@ mounting a half-working bridge.
 ## Development
 
 ```bash
-node --test          # 41 tests: routing, policy, audit, wait correlation, descriptor lifecycle
+node --test          # 45 tests: routing, policy, audit, wait correlation, descriptor lifecycle
 ```
 
 The tests bind ephemeral loopback ports and use a stub controller, so they need
